@@ -15,7 +15,10 @@ Performance design:
 """
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from contextlib import contextmanager
+from datetime import datetime
 
 import psycopg2
 import psycopg2.errors
@@ -23,8 +26,11 @@ import streamlit as st
 from psycopg2 import pool as pgpool
 from psycopg2.extras import RealDictCursor
 
-VOLATILE_TTL = 10  # seconds — specs, tasks, comments, chat (edited often)
-STABLE_TTL = 60    # seconds — project & user lists (edited rarely)
+# TTLs tuned for navigation speed. Staleness is bounded anyway: every write
+# clears the caches it touches (own changes are always instant), and 🔄 Refresh
+# clears everything — the TTL only caps how old a TEAMMATE's change can look.
+VOLATILE_TTL = 30   # seconds — specs, tasks, comments, chat
+STABLE_TTL = 120    # seconds — project & user lists
 
 # ---------------------------------------------------------------------------
 # Connection handling
@@ -35,9 +41,12 @@ STABLE_TTL = 60    # seconds — project & user lists (edited rarely)
 def _get_pool() -> pgpool.ThreadedConnectionPool:
     """One connection pool per server process, shared safely across sessions/threads."""
     cfg = st.secrets["database"]
+    # minconn=4: the pool opens (and TLS-handshakes) these eagerly at startup.
+    # Opening connections on demand mid-navigation is poison: N simultaneous
+    # TLS handshakes serialize on the GIL and turn 180ms queries into seconds.
     return pgpool.ThreadedConnectionPool(
-        minconn=1,
-        maxconn=10,
+        minconn=4,
+        maxconn=12,
         host=cfg["host"],
         port=cfg["port"],
         dbname=cfg["dbname"],
@@ -254,8 +263,8 @@ def _clear_user_caches() -> None:
 def clear_all_caches() -> None:
     """Clear every cached reader (used after a change that touches many tables)."""
     for cached in (
-        get_users, get_users_detailed, get_contacts, get_projects, get_project,
-        get_spec, get_tasks, get_urgent_open_tasks, get_comments_map, get_chat,
+        get_users, get_users_detailed, get_contacts, get_projects,
+        _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
     ):
         cached.clear()
 
@@ -368,11 +377,70 @@ def get_projects() -> list[dict]:
         return cur.fetchall()
 
 
-@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
-def get_project(project_id: int) -> dict | None:
+def _revive(row: dict | None) -> dict | None:
+    """row_to_json turns timestamptz into ISO strings — convert them back."""
+    if row is None:
+        return None
+    for key, value in row.items():
+        if key.endswith("_at") and isinstance(value, str):
+            row[key] = datetime.fromisoformat(value)
+    return row
+
+
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def _project_bundle(project_id: int) -> dict:
+    """Everything the project dashboard shows, in ONE database round-trip.
+
+    Navigation used to fire ~5 sequential queries (project, spec, tasks,
+    comments, chat) at ~180ms each. Fetching them in parallel is worse, not
+    better — concurrent TLS handshakes serialize on the GIL — so instead the
+    whole payload is aggregated to JSON server-side and fetched in a single
+    statement on one warm pooled connection.
+    """
     with get_cursor() as cur:
-        cur.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
-        return cur.fetchone()
+        cur.execute(
+            """
+            SELECT
+              (SELECT row_to_json(p) FROM projects p WHERE p.id = %(pid)s) AS project,
+              (SELECT row_to_json(s) FROM specs s WHERE s.project_id = %(pid)s) AS spec,
+              (SELECT COALESCE(json_agg(row_to_json(t)
+                       ORDER BY t.is_done, t.is_urgent DESC, t.created_at DESC), '[]'::json)
+                 FROM tasks t WHERE t.project_id = %(pid)s) AS tasks,
+              (SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.created_at), '[]'::json)
+                 FROM task_comments c JOIN tasks t ON t.id = c.task_id
+                WHERE t.project_id = %(pid)s) AS comments,
+              (SELECT COALESCE(json_agg(row_to_json(m) ORDER BY m.created_at), '[]'::json)
+                 FROM project_chat m WHERE m.project_id = %(pid)s) AS chat
+            """,
+            {"pid": project_id},
+        )
+        raw = cur.fetchone()
+
+        spec = _revive(raw["spec"])
+        if spec is None and raw["project"] is not None:
+            # Legacy project without a spec row — create it once, off the hot path.
+            cur.execute(
+                "INSERT INTO specs (project_id) VALUES (%s) ON CONFLICT DO NOTHING "
+                "RETURNING *",
+                (project_id,),
+            )
+            spec = dict(cur.fetchone())
+
+    comments_map: dict[int, list[dict]] = {}
+    for comment in raw["comments"]:
+        comments_map.setdefault(comment["task_id"], []).append(_revive(comment))
+
+    return {
+        "project": _revive(raw["project"]),
+        "spec": spec,
+        "tasks": [_revive(t) for t in raw["tasks"]],
+        "comments_map": comments_map,
+        "chat": [_revive(m) for m in raw["chat"]],
+    }
+
+
+def get_project(project_id: int) -> dict | None:
+    return _project_bundle(project_id)["project"]
 
 
 def add_project(name: str, user: str) -> int | None:
@@ -399,11 +467,7 @@ def delete_project(project_id: int) -> None:
     with get_cursor() as cur:
         cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
     get_projects.clear()
-    get_project.clear()
-    get_spec.clear()
-    _clear_task_caches()
-    get_comments_map.clear()
-    get_chat.clear()
+    _clear_task_caches()  # also clears _project_bundle (spec/comments/chat included)
 
 
 # ---------------------------------------------------------------------------
@@ -411,15 +475,8 @@ def delete_project(project_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_spec(project_id: int) -> dict:
-    with get_cursor() as cur:
-        cur.execute(
-            "INSERT INTO specs (project_id) VALUES (%s) ON CONFLICT DO NOTHING",
-            (project_id,),
-        )
-        cur.execute("SELECT * FROM specs WHERE project_id = %s", (project_id,))
-        return cur.fetchone()
+    return _project_bundle(project_id)["spec"]
 
 
 def save_spec(project_id: int, content: str, user: str) -> None:
@@ -435,7 +492,7 @@ def save_spec(project_id: int, content: str, user: str) -> None:
             """,
             (project_id, content, user),
         )
-    get_spec.clear()
+    _project_bundle.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -444,21 +501,21 @@ def save_spec(project_id: int, content: str, user: str) -> None:
 
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
-def get_tasks(project_id: int | None = None, task_type: str = "project") -> list[dict]:
-    # Open before done, urgent before regular, newest first.
-    order = "ORDER BY is_done, is_urgent DESC, created_at DESC"
+def _board_tasks(task_type: str) -> list[dict]:
+    """Tasks of the global boards (urgent / backlog) — not tied to a project."""
     with get_cursor() as cur:
-        if project_id is not None:
-            cur.execute(
-                f"SELECT * FROM tasks WHERE project_id = %s {order}",  # noqa: S608
-                (project_id,),
-            )
-        else:
-            cur.execute(
-                f"SELECT * FROM tasks WHERE task_type = %s AND project_id IS NULL {order}",  # noqa: S608
-                (task_type,),
-            )
+        cur.execute(
+            "SELECT * FROM tasks WHERE task_type = %s AND project_id IS NULL "
+            "ORDER BY is_done, is_urgent DESC, created_at DESC",
+            (task_type,),
+        )
         return cur.fetchall()
+
+
+def get_tasks(project_id: int | None = None, task_type: str = "project") -> list[dict]:
+    if project_id is not None:
+        return _project_bundle(project_id)["tasks"]
+    return _board_tasks(task_type)
 
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
@@ -482,8 +539,14 @@ def get_urgent_open_tasks() -> list[dict]:
 
 
 def _clear_task_caches() -> None:
-    get_tasks.clear()
+    _project_bundle.clear()
+    _board_tasks.clear()
+    _board_comments.clear()
     get_urgent_open_tasks.clear()
+
+
+# Public alias — tests and callers shouldn't reach for the underscore name.
+clear_task_caches = _clear_task_caches
 
 
 def add_task(
@@ -531,8 +594,7 @@ def set_task_done(task_id: int, done: bool, user: str) -> None:
 def delete_task(task_id: int) -> None:
     with get_cursor() as cur:
         cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
-    _clear_task_caches()
-    get_comments_map.clear()
+    _clear_task_caches()  # comments cascade with the task; _board_comments included
 
 
 # ---------------------------------------------------------------------------
@@ -541,27 +603,26 @@ def delete_task(task_id: int) -> None:
 
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
-def get_comments_map(
-    project_id: int | None = None, task_type: str = "project"
-) -> dict[int, list[dict]]:
-    """All comments for every task in scope, in ONE query (instead of one per task)."""
+def _board_comments(task_type: str) -> dict[int, list[dict]]:
     with get_cursor() as cur:
-        if project_id is not None:
-            cur.execute(
-                "SELECT c.* FROM task_comments c JOIN tasks t ON t.id = c.task_id "
-                "WHERE t.project_id = %s ORDER BY c.created_at",
-                (project_id,),
-            )
-        else:
-            cur.execute(
-                "SELECT c.* FROM task_comments c JOIN tasks t ON t.id = c.task_id "
-                "WHERE t.task_type = %s AND t.project_id IS NULL ORDER BY c.created_at",
-                (task_type,),
-            )
+        cur.execute(
+            "SELECT c.* FROM task_comments c JOIN tasks t ON t.id = c.task_id "
+            "WHERE t.task_type = %s AND t.project_id IS NULL ORDER BY c.created_at",
+            (task_type,),
+        )
         comments_map: dict[int, list[dict]] = {}
         for row in cur.fetchall():
             comments_map.setdefault(row["task_id"], []).append(row)
         return comments_map
+
+
+def get_comments_map(
+    project_id: int | None = None, task_type: str = "project"
+) -> dict[int, list[dict]]:
+    """All comments for every task in scope (one query, part of the bundle)."""
+    if project_id is not None:
+        return _project_bundle(project_id)["comments_map"]
+    return _board_comments(task_type)
 
 
 def add_comment(task_id: int, content: str, user: str) -> None:
@@ -570,7 +631,8 @@ def add_comment(task_id: int, content: str, user: str) -> None:
             "INSERT INTO task_comments (task_id, author, content) VALUES (%s, %s, %s)",
             (task_id, user, content),
         )
-    get_comments_map.clear()
+    _project_bundle.clear()
+    _board_comments.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -578,14 +640,8 @@ def add_comment(task_id: int, content: str, user: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_chat(project_id: int) -> list[dict]:
-    with get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM project_chat WHERE project_id = %s ORDER BY created_at",
-            (project_id,),
-        )
-        return cur.fetchall()
+    return _project_bundle(project_id)["chat"]
 
 
 def add_chat_message(project_id: int, message: str, user: str) -> None:
@@ -594,4 +650,55 @@ def add_chat_message(project_id: int, message: str, user: str) -> None:
             "INSERT INTO project_chat (project_id, sender, message) VALUES (%s, %s, %s)",
             (project_id, user, message),
         )
-    get_chat.clear()
+    _project_bundle.clear()
+
+
+# ---------------------------------------------------------------------------
+# Prefetching — parallel reads & cache warming for fast navigation
+# ---------------------------------------------------------------------------
+
+
+# A deliberately small pool: prefetch concurrency is bounded by the pool's
+# eagerly-opened connections (minconn). More workers would only trigger
+# on-demand TLS handshakes, which serialize on the GIL and stall everything.
+@st.cache_resource(show_spinner=False)
+def _prefetch_pool() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=3, thread_name_prefix="db-prefetch")
+
+
+def warm_project(project_id: int, wait: bool = True) -> None:
+    """Populate the project's bundle cache (one query) plus the shared lookups.
+
+    wait=False is fire-and-forget: used from the home screen to silently
+    pre-warm projects so clicking a bubble feels instant. Cache hits return in
+    microseconds, so re-warming an already-warm project is effectively free.
+    Errors are swallowed here — if the DB is down, the renderer's own read
+    will surface the failure with proper context.
+    """
+    jobs = (
+        lambda: _project_bundle(project_id),
+        lambda: get_contacts(),
+        lambda: get_users(),
+    )
+    futures = [_prefetch_pool().submit(job) for job in jobs]
+    if wait:
+        futures_wait(futures, timeout=15)
+        for f in futures:
+            if f.done():
+                f.exception()  # retrieve, so failures aren't logged as unhandled
+
+
+def prefetch_all_projects() -> None:
+    """Fire-and-forget warm of every project + the global boards (home screen).
+
+    One bundle query per project — with warm caches this whole call is a no-op.
+    """
+    try:
+        projects = get_projects()
+    except psycopg2.Error:
+        return
+    for project in projects:
+        _prefetch_pool().submit(lambda pid=project["id"]: _project_bundle(pid))
+    for board in ("urgent", "backlog"):
+        _prefetch_pool().submit(lambda b=board: _board_tasks(b))
+        _prefetch_pool().submit(lambda b=board: _board_comments(b))

@@ -115,7 +115,7 @@ def test_form_creates_urgent_task(pid):
 
 def test_completed_urgent_is_dimmed(at, row):
     db.set_task_done(row["id"], True, TEMP_ADMIN)
-    db.get_tasks.clear()
+    db.clear_task_caches()
     at = at.run()
     html_blocks = [m.value or "" for m in at.markdown if row["title"] in (m.value or "")]
     assert html_blocks, "Task not rendered"
@@ -130,7 +130,7 @@ def test_completed_urgent_is_dimmed(at, row):
 def test_ui_urgency_toggle(pid):
     """Flip urgency from the task list, in both directions, through the real UI."""
     db.add_task("משימה לסימון דחיפות", TEMP_ADMIN, TEMP_ADMIN, pid, "project")
-    db.get_tasks.clear()
+    db.clear_task_caches()
     task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה לסימון דחיפות")
     assert task["is_urgent"] is False
 
@@ -148,7 +148,7 @@ def test_ui_urgency_toggle(pid):
     print("PASS: clicking the greyed 🔥 marks a task urgent instantly (optimistic)")
 
     at = _wait_for_sync(at)
-    db.get_tasks.clear()
+    db.clear_task_caches()
     assert next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])["is_urgent"]
     assert task["id"] not in _ss(at, "task_urgent_override", {}), "Override should be pruned"
     print("PASS: urgency change synced to Supabase and the override was pruned")
@@ -159,7 +159,7 @@ def test_ui_urgency_toggle(pid):
         "Clicking the active toggle should clear urgency"
     )
     at = _wait_for_sync(at)
-    db.get_tasks.clear()
+    db.clear_task_caches()
     assert not next(
         t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
     )["is_urgent"]
@@ -191,7 +191,7 @@ def test_ui_uncomplete_pill(pid, task):
         "Clicking הושלם should bring the checkbox back (task reopened)"
     )
     at = _wait_for_sync(at)
-    db.get_tasks.clear()
+    db.clear_task_caches()
     assert not next(
         t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
     )["is_done"], "Un-complete did not sync to the database"

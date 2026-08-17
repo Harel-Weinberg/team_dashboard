@@ -572,6 +572,10 @@ def _render_chat(project_id: int):
 
 
 def render_project_dashboard(project: dict):
+    # Fill every cache this page reads in one parallel burst (~1 round-trip of
+    # wall-clock) instead of letting the tabs fetch sequentially.
+    db.warm_project(project["id"], wait=True)
+
     st.title(f"📂 {project['name']}")
     st.caption(f"נוצר על ידי {project['created_by']} · {fmt_ts(project['created_at'])}")
 
@@ -664,6 +668,11 @@ def render_welcome():
     st.caption(
         "כל שינוי מתועד עם השם והשעה ומסונכרן לענן — לחצו 🔄 רענון כדי לשלוף עדכונים מהצוות."
     )
+
+    # Silently pre-warm every project's data in the background while the user
+    # is looking at the home screen, so clicking a bubble feels instant.
+    # Warm caches make this a no-op (microseconds), so calling it per rerun is safe.
+    db.prefetch_all_projects()
 
 
 def _render_urgent_widget():

@@ -221,7 +221,7 @@ def test_regular_task_sends_nothing(pid, spy):
 def test_completion_trigger(pid, spy):
     """A task created by OTHER_USER, completed by TEMP_ADMIN -> notifies OTHER_USER."""
     db.add_task("משימה של השותף", TEMP_ADMIN, OTHER_USER, pid, "project")
-    db.get_tasks.clear()
+    db.clear_task_caches()
     task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה של השותף")
 
     at = _open_project(pid)
@@ -255,7 +255,7 @@ def test_completion_trigger(pid, spy):
 
 def test_self_completion_sends_nothing(pid, spy):
     db.add_task("משימה שלי", TEMP_ADMIN, TEMP_ADMIN, pid, "project")
-    db.get_tasks.clear()
+    db.clear_task_caches()
     task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה שלי")
     at = _open_project(pid)
     before = len(spy.calls)

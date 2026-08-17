@@ -155,7 +155,7 @@ def test_special_characters_survive_encoding():
 
 def test_ui_renders_icon(pid):
     db.add_task("משימה עם מייל", OTHER_USER, TEMP_ADMIN, pid, "project")
-    db.get_tasks.clear()
+    db.clear_task_caches()
     db.get_contacts.clear()
 
     at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
