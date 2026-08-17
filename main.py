@@ -14,7 +14,7 @@ import theme
 import ui_components as ui
 
 st.set_page_config(
-    page_title="AI & Tech Innovation — Dashboard",
+    page_title="צוות AI וחדשנות — דשבורד",
     page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -28,7 +28,7 @@ def main():
     try:
         db.init_db()
     except Exception as exc:  # noqa: BLE001 — surface any startup/DB failure cleanly
-        st.error(f"Cannot reach the database — check .streamlit/secrets.toml.\n\n{exc}")
+        st.error(f"אין חיבור למסד הנתונים — בדקו את .streamlit/secrets.toml.\n\n{exc}")
         st.stop()
 
     # 2. Authentication gate.
@@ -46,14 +46,14 @@ def main():
 
     if view == "urgent":
         ui.render_adhoc_board(
-            "🔥 Urgent Tasks",
-            "Ad-hoc critical bugs and urgent daily tasks (not tied to a project).",
+            "🔥 משימות דחופות",
+            "באגים קריטיים ומשימות יומיות דחופות שאינן משויכות לפרויקט מסוים.",
             task_type="urgent",
         )
     elif view == "backlog":
         ui.render_adhoc_board(
-            "💡 Future Backlog",
-            "Future ideas and long-term features.",
+            "💡 רעיונות לעתיד",
+            "רעיונות ופיצ'רים לטווח הארוך.",
             task_type="backlog",
         )
     elif view == "users":
@@ -64,7 +64,7 @@ def main():
         project = db.get_project(view[1])
         if project is None:
             st.session_state.pop("view", None)
-            st.warning("This project no longer exists.")
+            st.warning("הפרויקט הזה אינו קיים יותר.")
         else:
             ui.render_project_dashboard(project)
     else:

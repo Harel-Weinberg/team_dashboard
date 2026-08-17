@@ -66,7 +66,7 @@ def test_login_screen_renders():
 def test_wrong_password_rejected():
     at = login(new_app(), "Harel", "definitely-wrong-password")
     assert not current_user(at), "User must NOT be logged in"
-    assert at.error and "Incorrect" in at.error[0].value
+    assert at.error and "שגויים" in at.error[0].value
     print("PASS: wrong password rejected")
 
 

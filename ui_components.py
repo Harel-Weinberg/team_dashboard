@@ -1,10 +1,11 @@
 """
-ui_components.py — All reusable UI pieces:
+ui_components.py — All reusable UI pieces (Hebrew / RTL interface):
 
-* render_sidebar()            — navigation, Projects Hub, Add New Project
-* render_project_dashboard()  — Spec / Tasks / Chat tabs for one project
-* render_task_board()         — reusable task list (also powers Urgent & Backlog)
-* render_adhoc_board()        — Urgent Tasks / Future Backlog pages
+* render_sidebar()            — home button, navigation, projects hub, new project
+* render_project_dashboard()  — spec / tasks / chat tabs for one project
+* render_task_board()         — reusable task list (also powers urgent & backlog)
+* render_adhoc_board()        — urgent tasks / future backlog pages
+* render_welcome()            — personalized greeting + floating project bubbles
 * render_pending_project()    — placeholder while a new project syncs to the DB
 
 Write operations follow the Optimistic UI pattern (see optimistic.py): the
@@ -13,6 +14,7 @@ on a background thread; failed syncs surface as warnings and the UI falls
 back to database truth.
 """
 
+import html
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -56,7 +58,7 @@ def _resolve_pending_projects() -> list[dict]:
             continue
         new_id = future.result()
         if new_id is None:
-            st.warning(f"A project named '{entry['name']}' already exists.")
+            st.warning(f"פרויקט בשם '{entry['name']}' כבר קיים.")
             if selected_here:
                 st.session_state["view"] = None
         elif selected_here:
@@ -65,29 +67,46 @@ def _resolve_pending_projects() -> list[dict]:
     return pending
 
 
+def go_home() -> None:
+    """Clear the selected project and return to the main (bubbles) screen."""
+    st.session_state["view"] = None
+
+
 def render_sidebar():
     """Render navigation. Returns the current view: ('project', id) | ('pending_project', temp_id) | 'urgent' | 'backlog' | 'users' | None."""
     user = st.session_state["user"]
 
     with st.sidebar:
-        st.markdown("## 🚀 AI & Tech Innovation")
-        st.caption(f"Signed in as **{user}** {AVATARS.get(user, DEFAULT_AVATAR)}")
+        st.markdown("## 🚀 צוות AI וחדשנות")
+        st.caption(f"מחובר/ת: **{user}** {AVATARS.get(user, DEFAULT_AVATAR)}")
+
+        # --- Home ---------------------------------------------------------
+        on_home = st.session_state.get("view") is None
+        if st.button(
+            "🏠 דף הבית",
+            key="nav_home",
+            use_container_width=True,
+            type="primary" if on_home else "secondary",
+            help="חזרה למסך הראשי עם כל הפרויקטים",
+        ):
+            go_home()
+            st.rerun()
 
         top_left, top_right = st.columns(2)
-        if top_left.button("🔄 Refresh", use_container_width=True):
+        if top_left.button("🔄 רענון", use_container_width=True):
             st.cache_data.clear()  # force-pull teammates' latest changes
             st.rerun()
-        if top_right.button("🚪 Log out", use_container_width=True):
+        if top_right.button("🚪 יציאה", use_container_width=True):
             auth.logout()
 
         st.divider()
 
-        # --- Projects Hub -------------------------------------------------
-        st.markdown("### 📁 Projects Hub")
+        # --- Projects hub -------------------------------------------------
+        st.markdown("### 📁 הפרויקטים שלנו")
         pending_projects = _resolve_pending_projects()
         projects = db.get_projects()
         if not projects and not pending_projects:
-            st.caption("No projects yet — add one below.")
+            st.caption("עדיין אין פרויקטים — הוסיפו אחד למטה.")
         for project in projects:
             is_selected = st.session_state.get("view") == ("project", project["id"])
             if st.button(
@@ -109,22 +128,22 @@ def render_sidebar():
                 st.session_state["view"] = ("pending_project", entry["temp_id"])
                 st.rerun()
 
-        # --- Add New Project ----------------------------------------------
+        # --- New project ----------------------------------------------------
         with st.form("add_project_form", clear_on_submit=True, border=False):
             new_name = st.text_input(
-                "New project",
-                placeholder="New project name...",
+                "פרויקט חדש",
+                placeholder="שם פרויקט חדש...",
                 label_visibility="collapsed",
                 key="new_project_name",
             )
-            if st.form_submit_button("➕ Add New Project", use_container_width=True):
+            if st.form_submit_button("➕ פרויקט חדש", use_container_width=True):
                 name = new_name.strip()
                 if not name:
-                    st.warning("Please enter a project name.")
+                    st.warning("נא להזין שם פרויקט.")
                 else:
                     temp_id = uuid.uuid4().hex
                     future = optimistic.submit_write(
-                        f"new project '{name}'", db.add_project, name, user
+                        f"פרויקט '{name}'", db.add_project, name, user
                     )
                     st.session_state.setdefault("optimistic_projects", []).append(
                         {"temp_id": temp_id, "name": name, "future": future}
@@ -135,9 +154,9 @@ def render_sidebar():
         st.divider()
 
         # --- Standalone pages ----------------------------------------------
-        pages = [("🔥 Urgent Tasks", "urgent"), ("💡 Future Backlog", "backlog")]
+        pages = [("🔥 משימות דחופות", "urgent"), ("💡 רעיונות לעתיד", "backlog")]
         if auth.is_admin():
-            pages.append(("👥 User Management", "users"))
+            pages.append(("👥 ניהול משתמשים", "users"))
         for label, view_key in pages:
             is_selected = st.session_state.get("view") == view_key
             if st.button(
@@ -153,7 +172,7 @@ def render_sidebar():
 
 
 # ---------------------------------------------------------------------------
-# Module A — Product Specification
+# Module A — Product specification
 # ---------------------------------------------------------------------------
 
 
@@ -162,24 +181,24 @@ def _render_spec(project_id: int):
     spec = db.get_spec(project_id)
 
     content = st.text_area(
-        "Project characterization, logic and product spec — edited collaboratively:",
+        "אפיון הפרויקט, הלוגיקה והמוצר — נכתב במשותף:",
         value=spec["content"],
         height=420,
         key=f"spec_text_{project_id}",
-        placeholder="Describe the product, its logic, flows, edge cases...",
+        placeholder="תארו את המוצר, הלוגיקה, התהליכים ומקרי הקצה...",
     )
-    if st.button("💾 Save Specification", type="primary", key=f"spec_save_{project_id}"):
+    if st.button("💾 שמירת האפיון", type="primary", key=f"spec_save_{project_id}"):
         db.save_spec(project_id, content, user)
         st.rerun()
 
     if spec["updated_by"]:
-        st.caption(f"*Last updated by **{spec['updated_by']}** at {fmt_ts(spec['updated_at'])}*")
+        st.caption(f"*עודכן לאחרונה על ידי **{spec['updated_by']}** ב-{fmt_ts(spec['updated_at'])}*")
     else:
-        st.caption("*Not saved yet.*")
+        st.caption("*עדיין לא נשמר.*")
 
 
 # ---------------------------------------------------------------------------
-# Module B — Task board (shared by projects, Urgent and Backlog)
+# Module B — Task board (shared by projects, urgent and backlog)
 # ---------------------------------------------------------------------------
 
 
@@ -187,7 +206,7 @@ def _toggle_task(task_id: int, widget_key: str):
     """Optimistic toggle: remember the new status locally, sync in the background."""
     new_value = bool(st.session_state[widget_key])
     future = optimistic.submit_write(
-        "task status update", db.set_task_done, task_id, new_value, st.session_state["user"]
+        "סטטוס משימה", db.set_task_done, task_id, new_value, st.session_state["user"]
     )
     st.session_state.setdefault("task_done_override", {})[task_id] = {
         "value": new_value,
@@ -210,6 +229,19 @@ def _effective_done(task: dict) -> tuple[bool, bool]:
     return bool(task["is_done"]), False
 
 
+def _task_title_html(title: str, assignee: str | None, is_done: bool) -> str:
+    """Task title: bold when open, struck through and dimmed when completed."""
+    safe_title = html.escape(title)
+    body = (
+        f'<span class="task-done"><s>{safe_title}</s></span>'
+        if is_done
+        else f"<strong>{safe_title}</strong>"
+    )
+    if assignee:
+        body += f" · 👤 <code>{html.escape(assignee)}</code>"
+    return body
+
+
 def _render_task(task: dict, comments: list[dict]):
     user = st.session_state["user"]
     done_key = f"task_done_{task['id']}"
@@ -222,23 +254,25 @@ def _render_task(task: dict, comments: list[dict]):
     check_col, body_col = st.columns([0.06, 0.94])
     with check_col:
         st.checkbox(
-            "Done",
+            "בוצע",
             value=is_done,
             key=done_key,
             label_visibility="collapsed",
             on_change=_toggle_task,
             args=(task["id"], done_key),
+            help="סימון המשימה כבוצעה",
         )
     with body_col:
-        title = f"~~{task['title']}~~" if is_done else f"**{task['title']}**"
-        assignee = f" · 👤 `{task['assignee']}`" if task["assignee"] else ""
-        st.markdown(title + assignee)
+        st.markdown(
+            _task_title_html(task["title"], task["assignee"], is_done),
+            unsafe_allow_html=True,
+        )
 
-        meta = f"Created by {task['created_by']} · {fmt_ts(task['created_at'])}"
+        meta = f"נוצר על ידי {task['created_by']} · {fmt_ts(task['created_at'])}"
         if syncing:
-            meta += " · 🕓 syncing…"
+            meta += " · 🕓 מסתנכרן…"
         elif is_done and task["completed_by"]:
-            meta += f" · ✅ Completed by {task['completed_by']} at {fmt_ts(task['completed_at'])}"
+            meta += f" · ✅ בוצע על ידי {task['completed_by']} ב-{fmt_ts(task['completed_at'])}"
         st.caption(meta)
 
         comment_echoes = st.session_state.setdefault("optimistic_comments", {})
@@ -250,7 +284,7 @@ def _render_task(task: dict, comments: list[dict]):
         )
         comment_echoes[task["id"]] = pending_comments
 
-        with st.expander(f"💬 Notes ({len(comments) + len(pending_comments)})"):
+        with st.expander(f"💬 הערות ({len(comments) + len(pending_comments)})"):
             for comment in comments:
                 avatar = AVATARS.get(comment["author"], DEFAULT_AVATAR)
                 st.markdown(
@@ -263,7 +297,7 @@ def _render_task(task: dict, comments: list[dict]):
             for echo in pending_comments:
                 avatar = AVATARS.get(echo["author"], DEFAULT_AVATAR)
                 st.markdown(
-                    f"{avatar} **{echo['author']}** · <small>🕓 sending…</small>",
+                    f"{avatar} **{echo['author']}** · <small>🕓 נשלח…</small>",
                     unsafe_allow_html=True,
                 )
                 st.markdown(echo["content"])
@@ -271,16 +305,17 @@ def _render_task(task: dict, comments: list[dict]):
 
             with st.form(f"comment_form_{task['id']}", clear_on_submit=True, border=False):
                 note = st.text_area(
-                    "Leave a note on this task",
+                    "הוספת הערה למשימה",
                     height=80,
-                    placeholder="Write a note about this specific task...",
+                    placeholder="כתבו הערה על המשימה הזו...",
                     key=f"comment_text_{task['id']}",
+                    label_visibility="collapsed",
                 )
-                if st.form_submit_button("Add note"):
+                if st.form_submit_button("💬 שמירת הערה"):
                     text = note.strip()
                     if text:
                         future = optimistic.submit_write(
-                            "task note", db.add_comment, task["id"], text, user
+                            "הערה למשימה", db.add_comment, task["id"], text, user
                         )
                         comment_echoes.setdefault(task["id"], []).append(
                             {"author": user, "content": text, "future": future}
@@ -289,7 +324,7 @@ def _render_task(task: dict, comments: list[dict]):
 
             # Deleting stays synchronous on purpose: destructive actions should
             # confirm against the DB before the row disappears from the UI.
-            if st.button("🗑️ Delete task", key=f"task_delete_{task['id']}"):
+            if st.button("🗑️ מחיקת המשימה", key=f"task_delete_{task['id']}"):
                 db.delete_task(task["id"])
                 st.rerun()
 
@@ -298,9 +333,11 @@ def _render_pending_task(echo: dict):
     check_col, body_col = st.columns([0.06, 0.94])
     check_col.markdown("🕓")
     with body_col:
-        assignee = f" · 👤 `{echo['assignee']}`" if echo["assignee"] else ""
-        st.markdown(f"**{echo['title']}**" + assignee)
-        st.caption("Syncing to the database…")
+        st.markdown(
+            _task_title_html(echo["title"], echo["assignee"], is_done=False),
+            unsafe_allow_html=True,
+        )
+        st.caption("מסתנכרן עם מסד הנתונים…")
 
 
 def render_task_board(project_id: int | None = None, task_type: str = "project"):
@@ -308,22 +345,22 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
     scope = f"{task_type}_{project_id if project_id is not None else 'global'}"
     echo_key = f"optimistic_tasks_{scope}"
 
-    # --- Add new task ------------------------------------------------------
+    # --- Add a task --------------------------------------------------------
     with st.form(f"add_task_form_{scope}", clear_on_submit=True, border=False):
         title_col, assignee_col, button_col = st.columns([0.58, 0.24, 0.18])
         title = title_col.text_input(
-            "Task", placeholder="New task...", label_visibility="collapsed",
+            "משימה", placeholder="משימה חדשה...", label_visibility="collapsed",
             key=f"task_title_{scope}",
         )
         assignee = assignee_col.selectbox(
-            "Assign to", db.get_users(), label_visibility="collapsed",
+            "אחראי/ת", db.get_users(), label_visibility="collapsed",
             key=f"task_assignee_{scope}",
         )
-        if button_col.form_submit_button("➕ Add", use_container_width=True):
+        if button_col.form_submit_button("➕ הוספה", use_container_width=True):
             text = title.strip()
             if text:
                 future = optimistic.submit_write(
-                    f"task '{text}'", db.add_task, text, assignee, user, project_id, task_type
+                    f"משימה '{text}'", db.add_task, text, assignee, user, project_id, task_type
                 )
                 st.session_state.setdefault(echo_key, []).append(
                     {"title": text, "assignee": assignee, "created_by": user, "future": future}
@@ -341,11 +378,12 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
     st.session_state[echo_key] = pending_tasks
 
     if not tasks and not pending_tasks:
-        st.info("No tasks yet. Add the first one above.")
+        st.info("אין משימות עדיין — הוסיפו את הראשונה למעלה.")
         return
 
-    open_tasks = [t for t in tasks if not t["is_done"]]
-    st.caption(f"{len(open_tasks) + len(pending_tasks)} open / {len(tasks) + len(pending_tasks)} total")
+    open_count = len([t for t in tasks if not t["is_done"]]) + len(pending_tasks)
+    total_count = len(tasks) + len(pending_tasks)
+    st.caption(f'{open_count} פתוחות · {total_count} סה"כ')
     comments_map = db.get_comments_map(project_id=project_id, task_type=task_type)
     for task in tasks:
         _render_task(task, comments_map.get(task["id"], []))
@@ -379,14 +417,14 @@ def _render_chat(project_id: int):
     for echo in pending:
         avatar = AVATARS.get(echo["sender"], DEFAULT_AVATAR)
         with st.chat_message(echo["sender"], avatar=avatar):
-            st.markdown(f"**{echo['sender']}** · 🕓 *sending…*")
+            st.markdown(f"**{echo['sender']}** · 🕓 *נשלח…*")
             st.markdown(echo["message"])
 
-    prompt = st.chat_input("Message the team...", key=f"chat_input_{project_id}")
+    prompt = st.chat_input("כתבו הודעה לצוות...", key=f"chat_input_{project_id}")
     if prompt and prompt.strip():
         text = prompt.strip()
         future = optimistic.submit_write(
-            "chat message", db.add_chat_message, project_id, text, user
+            "הודעה בצ'אט", db.add_chat_message, project_id, text, user
         )
         st.session_state.setdefault(echo_key, []).append(
             {"sender": user, "message": text, "future": future}
@@ -401,10 +439,10 @@ def _render_chat(project_id: int):
 
 def render_project_dashboard(project: dict):
     st.title(f"📂 {project['name']}")
-    st.caption(f"Created by {project['created_by']} · {fmt_ts(project['created_at'])}")
+    st.caption(f"נוצר על ידי {project['created_by']} · {fmt_ts(project['created_at'])}")
 
     spec_tab, tasks_tab, chat_tab = st.tabs(
-        ["📋 Product Specification", "✅ Development Tasks", "💬 Project Communication"]
+        ["📋 אפיון המוצר", "✅ משימות פיתוח", "💬 תקשורת צוות"]
     )
     with spec_tab:
         _render_spec(project["id"])
@@ -428,7 +466,7 @@ def render_pending_project(temp_id: str):
     def _poll():
         if entry["future"].done():
             st.rerun(scope="app")  # sidebar resolver swaps this view for the real project
-        st.info(f"🕓 Creating project **{entry['name']}** — syncing to the database…")
+        st.info(f"🕓 יוצר את הפרויקט **{entry['name']}** — מסתנכרן עם מסד הנתונים…")
 
     _poll()
 
@@ -444,7 +482,7 @@ def render_welcome():
     user = st.session_state["user"]
 
     st.markdown(
-        f'<div class="welcome-greeting">ברוך הבא, {user} 👋</div>'
+        f'<div class="welcome-greeting">ברוך הבא, {html.escape(user)} 👋</div>'
         '<div class="welcome-sub">צוות AI וחדשנות · דשבורד ניהול משימות</div>',
         unsafe_allow_html=True,
     )

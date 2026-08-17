@@ -57,14 +57,14 @@ def _attribution_counts(username: str) -> dict[str, int]:
 
 def test_validation():
     cases = [
-        ("", "Please enter a username."),
-        ("a", "characters"),                      # too short
-        ("has space", "no spaces"),               # invalid character
-        ("bad/slash", "no spaces"),               # invalid character
-        ("x" * 33, "characters"),                 # too long
-        (TEMP_ADMIN, "already the current"),      # unchanged
-        ("Harel", "already exists"),              # duplicate (real user)
-        ("harel", "already exists"),              # duplicate, case-insensitive
+        ("", "נא להזין"),                          # empty
+        ("a", "תווים"),                            # too short
+        ("has space", "רווחים"),                   # invalid character
+        ("bad/slash", "רווחים"),                   # invalid character
+        ("x" * 33, "תווים"),                       # too long
+        (TEMP_ADMIN, "שם המשתמש הנוכחי"),          # unchanged
+        ("Harel", "כבר קיים"),                     # duplicate (real user)
+        ("harel", "כבר קיים"),                     # duplicate, case-insensitive
     ]
     for candidate, expected in cases:
         error = admin_ui._validate_username(candidate, current_name=TEMP_ADMIN)
@@ -132,7 +132,7 @@ def test_ui_rename_updates_session_state():
     )
     assert at.session_state["role"] == "admin", "Role must survive the rename"
     assert db.get_user(TEMP_ADMIN) is not None and db.get_user(RENAMED) is None
-    assert any("Username changed" in (s.value or "") for s in at.success), (
+    assert any("שם המשתמש שונה" in (s.value or "") for s in at.success), (
         f"Expected a success message, got {[s.value for s in at.success]}"
     )
     print("PASS: UI rename of the active user updates session_state and shows confirmation")

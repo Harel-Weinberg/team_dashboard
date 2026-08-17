@@ -171,10 +171,10 @@ def require_login() -> bool:
                 unsafe_allow_html=True,
             )
             username = st.text_input(
-                "Username", placeholder="Username", label_visibility="collapsed"
+                "שם משתמש", placeholder="שם משתמש", label_visibility="collapsed"
             )
             password = st.text_input(
-                "Password", type="password", placeholder="Password",
+                "סיסמה", type="password", placeholder="סיסמה",
                 label_visibility="collapsed",
             )
             submitted = st.form_submit_button("כניסה", use_container_width=True, type="primary")
@@ -187,9 +187,9 @@ def require_login() -> bool:
                     st.session_state["role"] = user["role"]
                     st.rerun()
                 else:
-                    st.error("Incorrect username or password. Please try again.")
+                    st.error("שם משתמש או סיסמה שגויים. נסו שוב.")
             except psycopg2.OperationalError as exc:
-                st.error(f"Cannot reach the database — check .streamlit/secrets.toml.\n\n{exc}")
+                st.error(f"אין חיבור למסד הנתונים — בדקו את .streamlit/secrets.toml.\n\n{exc}")
     return False
 
 

@@ -65,8 +65,8 @@ def main():
         page.goto(BASE, wait_until="networkidle")
 
         # --- Login screen ---------------------------------------------------
-        page.get_by_placeholder("Username").fill(TEMP_ADMIN)
-        page.get_by_placeholder("Password").fill(TEMP_ADMIN_PW)
+        page.get_by_placeholder("שם משתמש").fill(TEMP_ADMIN)
+        page.get_by_placeholder("סיסמה").fill(TEMP_ADMIN_PW)
         page.screenshot(path=os.path.join(SHOTS, "1_login.png"))
         page.get_by_role("button", name="כניסה").click()
 
@@ -134,12 +134,12 @@ def main():
         results.append(("project dashboard tabs render", tabs_ok, tabs_ok))
 
         # --- Tasks tab (RTL columns) ---------------------------------------------
-        page.get_by_role("tab", name="Development Tasks").click()
+        page.get_by_role("tab", name="משימות פיתוח").click()
         page.wait_for_timeout(1200)
         task_title = "בדיקת משימה RTL"
-        page.get_by_placeholder("New task...").fill(task_title)
+        page.get_by_placeholder("משימה חדשה...").fill(task_title)
         page.locator('[data-testid="stMain"]').get_by_role(
-            "button", name="➕ Add", exact=True
+            "button", name="➕ הוספה", exact=True
         ).click()
         page.wait_for_timeout(1200)  # optimistic echo should appear immediately
         echo_visible = page.get_by_text(task_title).count() > 0
@@ -149,22 +149,64 @@ def main():
         caption = page.evaluate(
             """() => {
                 const el = [...document.querySelectorAll('[data-testid="stMain"] p, [data-testid="stMain"] span')]
-                    .find(e => /open \\/ /.test(e.textContent) && e.children.length === 0);
+                    .find(e => /\u05e4\u05ea\u05d5\u05d7\u05d5\u05ea/.test(e.textContent) && e.children.length === 0);
                 if (!el) return null;
                 return {text: el.textContent.trim(), bidi: getComputedStyle(el).unicodeBidi};
             }"""
         )
         if caption:
             results.append(
-                (f"english caption keeps LTR word order: '{caption['text']}'",
+                (f"task counter caption renders: '{caption['text']}'",
                  caption["bidi"] == "plaintext", caption["bidi"]),
             )
+        # --- Completion checkbox: strikethrough + dimming --------------------------
+        # Let the optimistic write land, then force a server rerun so the echo is
+        # replaced by the real DB row (which has the checkbox). NOTE: never call
+        # page.reload() here — that starts a new Streamlit session and logs out.
+        page.wait_for_timeout(3000)
+        page.get_by_role("button", name="🔄 רענון").click()
+        page.wait_for_timeout(2500)
+        page.get_by_role("tab", name="משימות פיתוח").click()  # rerun resets to tab 1
+        page.wait_for_timeout(1500)
+
+        # Streamlit visually hides the real <input> behind a styled label.
+        page.locator('[class*="st-key-task_done_"] label').first.click()
+        page.wait_for_timeout(1500)
+        checked = page.locator(
+            '[class*="st-key-task_done_"] input[type="checkbox"]'
+        ).first.is_checked()
+        results.append(("completion checkbox toggles on", checked, checked))
+        done_style = page.evaluate(
+            """() => {
+                const el = document.querySelector('.task-done');
+                if (!el) return null;
+                const s = getComputedStyle(el);
+                return {opacity: s.opacity, struck: !!el.querySelector('s'),
+                        text: el.textContent.trim()};
+            }"""
+        )
+        results.append(
+            ("completed task is struck through and dimmed",
+             bool(done_style) and done_style["struck"] and float(done_style["opacity"]) < 1,
+             done_style),
+        )
         page.screenshot(path=os.path.join(SHOTS, "5_tasks_rtl.png"), full_page=True)
 
+        # --- Per-task note (Hebrew expander + optimistic save) ---------------------
+        page.get_by_text("הערות (", exact=False).first.click()
+        page.wait_for_timeout(800)
+        note_text = "הערה לבדיקה"
+        page.locator('[class*="st-key-comment_text_"] textarea').first.fill(note_text)
+        page.get_by_role("button", name="שמירת הערה").first.click()
+        page.wait_for_timeout(1500)
+        note_visible = page.get_by_text(note_text).count() > 0
+        results.append(("task note saved and visible (Hebrew UI)", note_visible, note_visible))
+        page.screenshot(path=os.path.join(SHOTS, "5b_task_note.png"), full_page=True)
+
         # --- Chat tab (avatar side + optimistic echo) -----------------------------
-        page.get_by_role("tab", name="Project Communication").click()
+        page.get_by_role("tab", name="תקשורת צוות").click()
         page.wait_for_timeout(1200)
-        page.get_by_placeholder("Message the team...").fill("שלום צוות — בדיקת RTL")
+        page.get_by_placeholder("כתבו הודעה לצוות...").fill("שלום צוות — בדיקת RTL")
         page.keyboard.press("Enter")
         page.wait_for_timeout(1500)
         chat_visible = page.get_by_text("שלום צוות — בדיקת RTL").count() > 0
@@ -188,6 +230,17 @@ def main():
                  f"avatar x={geom['avatar']:.0f}, body x={geom['body']:.0f}"),
             )
         page.screenshot(path=os.path.join(SHOTS, "6_chat_rtl.png"), full_page=True)
+
+        # --- Home button returns to the bubbles screen -----------------------------
+        home = page.get_by_role("button", name="🏠 דף הבית")
+        results.append(("home button present in sidebar", home.count() > 0, home.count()))
+        home.first.click()
+        page.wait_for_timeout(2000)
+        back_home = page.get_by_text("ברוך הבא", exact=False).count() > 0
+        bubbles_back = page.locator(".st-key-project_bubbles button").count() > 0
+        results.append(("home button clears the project and shows the greeting", back_home, back_home))
+        results.append(("home screen shows the project bubbles again", bubbles_back, bubbles_back))
+        page.screenshot(path=os.path.join(SHOTS, "7_home_button.png"), full_page=True)
 
         browser.close()
 

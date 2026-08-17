@@ -108,6 +108,12 @@ code, pre, [data-testid="stDataFrame"] {
     text-align: left;
 }
 
+/* Completed tasks: struck through (inline <s>) and dimmed. */
+.task-done {
+    opacity: 0.5;
+    color: #6b7280;
+}
+
 /* =======================================================================
    2. Welcome screen — personalized greeting
    ======================================================================= */
