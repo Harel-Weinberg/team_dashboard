@@ -88,6 +88,20 @@ are only written to the console log, which is handy for local testing:
 WhatsApp via Twilio is stubbed out in `_send_whatsapp()` — install `twilio`,
 set `NOTIFY_CHANNEL=whatsapp` and the `TWILIO_*` variables to switch channel.
 
+### Manual email (📧 icon) — no SMTP needed
+
+Every task row also has a small **📧** icon that opens your own mail client with
+a pre-filled draft (a `mailto:` link, fully URL-encoded so Hebrew survives):
+
+| Task state | Addressed to | Subject |
+|---|---|---|
+| Open | the assignee | התראה על משימה: {משימה} — prefixed `[דחוף]` when urgent |
+| Completed | whoever created it | משימה הושלמה: {משימה} |
+
+The icon is hidden when the recipient has no email on file. For completed
+tasks you can set a fallback address with `TEAM_EMAIL` (env var, or
+`team_email` under `[notifications]` in secrets).
+
 ## Usage notes
 
 - **🔄 Refresh** (sidebar) pulls your teammate's latest changes; Streamlit also

@@ -240,8 +240,28 @@ def _effective_done(task: dict) -> tuple[bool, bool]:
     return bool(task["is_done"]), False
 
 
+def _mail_icon_html(mailto: str | None, is_done: bool) -> str:
+    """Minimalist 📧 link that opens the user's mail client with a ready draft.
+
+    Returns "" when the recipient has no email on file, so the icon is hidden.
+    """
+    if not mailto:
+        return ""
+    tooltip = "שליחת מייל על סיום המשימה" if is_done else "שליחת התראה במייל לאחראי/ת"
+    # html.escape() turns the query separator '&' into '&amp;' — required for a
+    # valid href attribute; the browser decodes it back when following the link.
+    return (
+        f'<a class="task-mail" href="{html.escape(mailto, quote=True)}" '
+        f'title="{tooltip}" aria-label="{tooltip}">📧</a>'
+    )
+
+
 def _task_title_html(
-    title: str, assignee: str | None, is_done: bool, is_urgent: bool = False
+    title: str,
+    assignee: str | None,
+    is_done: bool,
+    is_urgent: bool = False,
+    mailto: str | None = None,
 ) -> str:
     """Task title: urgent tag first, bold when open, struck through + dimmed when done."""
     safe_title = html.escape(title)
@@ -252,8 +272,11 @@ def _task_title_html(
     if assignee:
         parts.append(f"· 👤 <code>{html.escape(assignee)}</code>")
     body = " ".join(parts)
-    # When completed, dim the whole line (tag and assignee included).
-    return f'<span class="task-done">{body}</span>' if is_done else body
+    # When completed, dim the whole line (tag and assignee included) — but keep
+    # the mail link outside the dimmed wrapper so it stays clearly clickable.
+    if is_done:
+        body = f'<span class="task-done">{body}</span>'
+    return body + _mail_icon_html(mailto, is_done)
 
 
 def _render_task(task: dict, comments: list[dict]):
@@ -279,7 +302,8 @@ def _render_task(task: dict, comments: list[dict]):
     with body_col:
         st.markdown(
             _task_title_html(
-                task["title"], task["assignee"], is_done, task.get("is_urgent", False)
+                task["title"], task["assignee"], is_done, task.get("is_urgent", False),
+                mailto=notifications.build_mailto_link(task, is_done=is_done),
             ),
             unsafe_allow_html=True,
         )

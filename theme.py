@@ -129,6 +129,22 @@ code, pre, [data-testid="stDataFrame"] {
     white-space: nowrap;
 }
 
+/* Minimalist mail icon next to a task (opens a pre-filled mailto: draft). */
+a.task-mail {
+    text-decoration: none;
+    margin-inline-start: 0.45rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    opacity: 0.45;
+    transition: opacity 0.15s ease, background 0.15s ease;
+}
+a.task-mail:hover {
+    opacity: 1;
+    background: rgba(140, 114, 163, 0.14);
+    text-decoration: none;
+}
+
 /* Keep the "urgent" checkbox in the task bar tight and vertically centred. */
 [data-testid="stMain"] [data-testid="stForm"] [data-testid="stCheckbox"] label {
     margin-bottom: 0;

@@ -27,6 +27,7 @@ import os
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
+from urllib.parse import quote
 
 import streamlit as st
 
@@ -77,11 +78,13 @@ def bootstrap_from_secrets() -> None:
         for key, value in values.items():
             env_key = key.upper() if key.upper().startswith(prefix) else f"{prefix}{key.upper()}"
             os.environ.setdefault(env_key, str(value))
-    if "channel" not in os.environ:
-        try:
-            os.environ.setdefault("NOTIFY_CHANNEL", str(st.secrets["notifications"]["channel"]))
-        except (KeyError, FileNotFoundError):
-            pass
+    try:
+        section = st.secrets["notifications"]
+    except (KeyError, FileNotFoundError):
+        return
+    for key, env_key in (("channel", "NOTIFY_CHANNEL"), ("team_email", "TEAM_EMAIL")):
+        if key in section:
+            os.environ.setdefault(env_key, str(section[key]))
 
 
 def channel() -> str:
@@ -198,6 +201,62 @@ def dispatch(recipient: str, message: str) -> str:
 def notify_urgent_assignment(assignee: str, task_title: str) -> str:
     """Trigger 1 — a new urgent task was assigned."""
     return dispatch(assignee, URGENT_ASSIGNMENT.format(assignee=assignee, title=task_title))
+
+
+# ---------------------------------------------------------------------------
+# Manual, on-demand email: mailto: links
+# ---------------------------------------------------------------------------
+
+OPEN_SUBJECT = "התראה על משימה: {title}"
+OPEN_SUBJECT_URGENT = "[דחוף] התראה על משימה: {title}"
+OPEN_BODY = (
+    "היי {assignee},\n\nזוהי התראה לגבי המשימה הבאה:\n{title}\n\nלטיפולך בהקדם."
+)
+DONE_SUBJECT = "משימה הושלמה: {title}"
+DONE_BODY = (
+    "היי,\n\nהמשימה '{title}' סומנה כבוצעה בהצלחה.\n\nבברכה,\nצוות AI וחדשנות"
+)
+
+
+def team_email() -> str | None:
+    """Fallback recipient for completed tasks whose creator has no address."""
+    return os.environ.get("TEAM_EMAIL") or None
+
+
+def build_mailto_link(task: dict, is_done: bool | None = None) -> str | None:
+    """Build a URL-encoded mailto: link for a task, or None if there's no recipient.
+
+    Open task      -> to the assignee, subject/body asking them to handle it.
+    Completed task -> to whoever created it (or TEAM_EMAIL), confirming completion.
+
+    `is_done` lets the caller pass the optimistic (locally-toggled) status
+    instead of the value stored in the database.
+    """
+    contacts = db.get_contacts()
+    done = task.get("is_done", False) if is_done is None else is_done
+    title = task.get("title") or ""
+
+    if done:
+        creator = task.get("created_by")
+        address = (contacts.get(creator, {}) or {}).get("email") or team_email()
+        subject = DONE_SUBJECT.format(title=title)
+        body = DONE_BODY.format(title=title)
+    else:
+        assignee = task.get("assignee")
+        address = (contacts.get(assignee, {}) or {}).get("email")
+        template = OPEN_SUBJECT_URGENT if task.get("is_urgent") else OPEN_SUBJECT
+        subject = template.format(title=title)
+        body = OPEN_BODY.format(assignee=assignee or "", title=title)
+
+    if not address:
+        return None  # nothing to send to — the caller hides the button
+
+    # quote() percent-encodes Hebrew, spaces and newlines, and (crucially for a
+    # query string) also &, ? and # that could otherwise break the link.
+    return (
+        f"mailto:{quote(address, safe='@')}"
+        f"?subject={quote(subject)}&body={quote(body)}"
+    )
 
 
 def notify_task_completed(creator: str | None, task_title: str, completed_by: str) -> str | None:

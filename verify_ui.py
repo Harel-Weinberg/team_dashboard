@@ -25,6 +25,8 @@ TEMP_PROJECTS = ["בדיקה: בוט AI", "בדיקה: המרת מסמכים", "
 
 def seed():
     create_temp_admin()
+    # Give the temp admin an address so the mailto: icon has a recipient.
+    db.set_user_contact(TEMP_ADMIN, "temp-admin@example.test", None)
     for name in TEMP_PROJECTS:
         db.add_project(name, TEMP_ADMIN)
 
@@ -245,6 +247,23 @@ def main():
             ("completed task is struck through and dimmed",
              bool(done_style) and done_style["struck"] and float(done_style["opacity"]) < 1,
              done_style),
+        )
+        # --- Manual mailto: icon --------------------------------------------------
+        mail = page.evaluate(
+            """() => {
+                const a = document.querySelector('a.task-mail');
+                if (!a) return null;
+                const s = getComputedStyle(a);
+                return {href: a.getAttribute('href'), text: a.textContent.trim(),
+                        opacity: s.opacity, title: a.getAttribute('title')};
+            }"""
+        )
+        results.append(
+            ("task row shows a 📧 mailto link",
+             bool(mail) and mail["href"].startswith("mailto:")
+             and "subject=" in mail["href"] and "body=" in mail["href"]
+             and mail["text"] == "📧",
+             {k: (v[:60] if k == "href" else v) for k, v in (mail or {}).items()}),
         )
         page.screenshot(path=os.path.join(SHOTS, "5_tasks_rtl.png"), full_page=True)
 
