@@ -56,9 +56,9 @@ def test_login_screen_renders():
     assert not at.exception, f"App crashed on load: {at.exception[0] if at.exception else ''}"
     assert len(at.text_input) >= 2, "Expected username + password inputs"
     assert any(
-        "AI &amp; Tech Innovation" in (m.value or "") or "AI & Tech Innovation" in (m.value or "")
+        "צוות AI וחדשנות" in (m.value or "") and "דשבורד ניהול משימות" in (m.value or "")
         for m in at.markdown
-    ), "Expected the branded login header"
+    ), "Expected the branded Hebrew login header"
     assert at.button and at.button[0].label == "כניסה", "Expected the Hebrew submit button"
     print("PASS: styled login screen renders (logo header, 2 inputs, כניסה button)")
 

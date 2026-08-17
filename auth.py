@@ -166,8 +166,8 @@ def require_login() -> bool:
         with st.form("login_form"):
             st.markdown(
                 f'<div class="login-logo">{_LOGO_SVG}</div>'
-                '<h1 class="login-title">AI &amp; Tech Innovation</h1>'
-                '<p class="login-subtitle">Project Management &amp; Control Dashboard</p>',
+                '<h1 class="login-title">צוות AI וחדשנות</h1>'
+                '<p class="login-subtitle">דשבורד ניהול משימות</p>',
                 unsafe_allow_html=True,
             )
             username = st.text_input(
