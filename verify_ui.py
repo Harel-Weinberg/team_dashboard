@@ -183,27 +183,11 @@ def main():
             echo_visible = f"not rendered: {exc}"
         results.append(("optimistic task echo visible in RTL layout", echo_visible is True, echo_visible))
 
-        # Urgent tag: red pill rendered next to the task name.
-        try:
-            page.wait_for_selector(".task-urgent", timeout=15000)
-        except Exception:  # noqa: BLE001 — the assertion below reports it
-            pass
-        tag = page.evaluate(
-            """() => {
-                const el = document.querySelector('.task-urgent');
-                if (!el) return null;
-                const s = getComputedStyle(el);
-                return {text: el.textContent.trim(), color: s.color,
-                        background: s.backgroundColor, radius: s.borderTopLeftRadius};
-            }"""
-        )
-        results.append(
-            ("urgent task shows a red 'דחוף' pill",
-             bool(tag) and "דחוף" in tag["text"] and tag["color"] == "rgb(192, 32, 47)",
-             tag),
-        )
-
-        # Bidi sanity: an English caption must not have its digits/words reordered.
+        # NOTE: the inline `.task-urgent` pill only exists while a task is still
+        # an un-synced optimistic echo, so asserting on it here is inherently
+        # racy — it is covered deterministically in test_urgent_tasks.py. What
+        # matters in the browser is the interactive toggle, verified below.
+        # Bidi sanity: a mixed Hebrew/number caption must not be reordered.
         caption = page.evaluate(
             """() => {
                 const el = [...document.querySelectorAll('[data-testid="stMain"] p, [data-testid="stMain"] span')]
@@ -227,13 +211,70 @@ def main():
         page.get_by_role("tab", name="משימות פיתוח").click()  # rerun resets to tab 1
         page.wait_for_timeout(1500)
 
+        # --- Urgency toggle on an existing task -----------------------------------
+        urgent_on = page.locator('[class*="st-key-task_urgent_on_"] button').first
+        pill = urgent_on.evaluate(
+            """el => { const s = getComputedStyle(el);
+                       return {text: el.textContent.trim(), color: s.color,
+                               background: s.backgroundColor, radius: s.borderTopLeftRadius}; }"""
+        )
+        results.append(
+            ("existing urgent task shows an interactive red 🔥 דחוף toggle",
+             "דחוף" in pill["text"] and pill["color"] == "rgb(192, 32, 47)"
+             and pill["radius"] == "999px",
+             pill),
+        )
+        urgent_on.click()  # turn urgency OFF
+        page.wait_for_selector('[class*="st-key-task_urgent_off_"] button', timeout=15000)
+        # Move the pointer away and let the CSS transition settle, otherwise we
+        # measure hover/mid-animation values instead of the resting style.
+        page.mouse.move(5, 5)
+        page.wait_for_timeout(600)
+        off_style = page.evaluate(
+            """() => { const el = document.querySelector('[class*="st-key-task_urgent_off_"] button');
+                       const s = getComputedStyle(el);
+                       return {filter: s.filter, opacity: s.opacity, border: s.borderStyle}; }"""
+        )
+        results.append(
+            ("toggling off shows a greyed-out 🔥 button",
+             "grayscale(1)" in off_style["filter"] and float(off_style["opacity"]) < 1,
+             off_style),
+        )
+        page.locator('[class*="st-key-task_urgent_off_"] button').first.click()  # back ON
+        page.wait_for_selector('[class*="st-key-task_urgent_on_"] button', timeout=15000)
+        results.append(("toggling back on restores the urgent state", True, "round-trip ok"))
+
+        # --- Larger mail icon ------------------------------------------------------
+        mail_size = page.evaluate(
+            """() => { const a = document.querySelector('a.task-mail');
+                       return a ? getComputedStyle(a).fontSize : null; }"""
+        )
+        results.append(
+            ("mail icon is enlarged (>=1.5rem / 24px)",
+             bool(mail_size) and float(mail_size.replace("px", "")) >= 24, mail_size),
+        )
+
+        # --- Completion: checkbox -> green הושלם pill ------------------------------
         # Streamlit visually hides the real <input> behind a styled label.
         page.locator('[class*="st-key-task_done_"] label').first.click()
-        page.wait_for_timeout(1500)
-        checked = page.locator(
-            '[class*="st-key-task_done_"] input[type="checkbox"]'
-        ).first.is_checked()
-        results.append(("completion checkbox toggles on", checked, checked))
+        page.wait_for_selector('[class*="st-key-task_undone_"] button', timeout=15000)
+        done_pill = page.evaluate(
+            """() => { const el = document.querySelector('[class*="st-key-task_undone_"] button');
+                       const s = getComputedStyle(el);
+                       const box = el.getBoundingClientRect();
+                       const body = document.querySelector('[data-testid="stMain"]').getBoundingClientRect();
+                       return {text: el.textContent.trim(), color: s.color,
+                               background: s.backgroundColor, radius: s.borderTopLeftRadius,
+                               fromRight: body.right - box.right}; }"""
+        )
+        results.append(
+            ("completed task shows a green ✅ הושלם pill on the right",
+             "הושלם" in done_pill["text"] and done_pill["color"] == "rgb(19, 122, 63)"
+             and done_pill["fromRight"] < 120,
+             done_pill),
+        )
+        checkbox_gone = page.locator('[class*="st-key-task_done_"] input').count() == 0
+        results.append(("the checkbox is replaced once completed", checkbox_gone, checkbox_gone))
         done_style = page.evaluate(
             """() => {
                 const el = document.querySelector('.task-done');

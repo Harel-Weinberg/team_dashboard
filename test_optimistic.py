@@ -108,7 +108,10 @@ def test_optimistic_task_and_comment(at, project_id):
     t = time.perf_counter()
     at = at.run()
     elapsed = (time.perf_counter() - t) * 1000
-    assert at.checkbox(key=f"task_done_{task['id']}").value is True
+    # A completed task swaps its checkbox for the green "✅ הושלם" pill.
+    assert any(b.key == f"task_undone_{task['id']}" for b in at.button), (
+        "Completion should show instantly as the הושלם pill"
+    )
     print(f"PASS: task toggle reflected instantly (interaction run: {elapsed:.0f} ms)")
     at = _wait_for_sync(at)
     fresh = next(x for x in db.get_tasks(project_id=project_id) if x["id"] == task["id"])

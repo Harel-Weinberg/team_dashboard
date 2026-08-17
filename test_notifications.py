@@ -242,11 +242,12 @@ def test_completion_trigger(pid, spy):
     print("PASS: trigger 2 — completion notifies the creator with the exact Hebrew message")
     print("PASS: UI queues a Hebrew toast for the notification")
 
-    # Un-checking must not notify anyone.
+    # Un-completing must not notify anyone. A completed task shows the green
+    # "✅ הושלם" button instead of a checkbox, so click that to reopen it.
     at = _wait_for_sync(at)
     before = len(spy.calls)
-    at.checkbox(key=f"task_done_{task['id']}").set_value(False)
-    at = at.run()
+    undone = next(b for b in at.button if b.key == f"task_undone_{task['id']}")
+    at = undone.set_value(True).run()
     at = _wait_for_sync(at)
     assert len(spy.calls) == before, f"Un-completing should not notify: {spy.calls[before:]}"
     print("PASS: un-checking a completed task sends no notification")

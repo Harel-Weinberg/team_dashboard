@@ -129,20 +129,79 @@ code, pre, [data-testid="stDataFrame"] {
     white-space: nowrap;
 }
 
-/* Minimalist mail icon next to a task (opens a pre-filled mailto: draft). */
+/* Mail icon next to a task — a clear call-to-action (opens a mailto: draft). */
 a.task-mail {
     text-decoration: none;
-    margin-inline-start: 0.45rem;
-    padding: 0.05rem 0.3rem;
-    border-radius: 8px;
-    font-size: 0.9rem;
-    opacity: 0.45;
-    transition: opacity 0.15s ease, background 0.15s ease;
+    display: inline-block;
+    margin-inline-start: 0.55rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 10px;
+    font-size: 1.5rem;
+    line-height: 1;
+    vertical-align: middle;
+    opacity: 0.75;
+    transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
 }
 a.task-mail:hover {
     opacity: 1;
     background: rgba(140, 114, 163, 0.14);
+    transform: translateY(-1px);
     text-decoration: none;
+}
+
+/* --- Task row controls ---------------------------------------------------- */
+
+/* Completed: prominent green pill (click to un-complete). */
+[class*="st-key-task_undone_"] button {
+    background: #e8f7ee;
+    color: #137a3f !important;
+    border: 1px solid rgba(19, 122, 63, 0.30);
+    border-radius: 999px;
+    padding: 0.12rem 0.6rem;
+    min-height: 0;
+    font-size: 0.78rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+[class*="st-key-task_undone_"] button:hover {
+    background: #d7f0e2;
+    border-color: rgba(19, 122, 63, 0.55);
+}
+
+/* Urgency toggle — active state: red pill matching the old static tag. */
+[class*="st-key-task_urgent_on_"] button {
+    background: #fdecec;
+    color: #c0202f !important;
+    border: 1px solid rgba(192, 32, 47, 0.28);
+    border-radius: 999px;
+    padding: 0.12rem 0.55rem;
+    min-height: 0;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+[class*="st-key-task_urgent_on_"] button:hover {
+    background: #fbdcdc;
+    border-color: rgba(192, 32, 47, 0.55);
+}
+
+/* Urgency toggle — inactive state: greyed-out, quiet until hovered. */
+[class*="st-key-task_urgent_off_"] button {
+    background: transparent;
+    border: 1px dashed #d7dbe4;
+    border-radius: 999px;
+    padding: 0.12rem 0.5rem;
+    min-height: 0;
+    font-size: 0.75rem;
+    filter: grayscale(1);
+    opacity: 0.45;
+    transition: opacity 0.15s ease, filter 0.15s ease;
+}
+[class*="st-key-task_urgent_off_"] button:hover {
+    opacity: 1;
+    filter: grayscale(0);
+    border-style: solid;
+    border-color: rgba(192, 32, 47, 0.45);
 }
 
 /* Keep the "urgent" checkbox in the task bar tight and vertically centred. */

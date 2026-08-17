@@ -203,17 +203,16 @@ def _render_spec(project_id: int):
 # ---------------------------------------------------------------------------
 
 
-def _toggle_task(task_id: int, widget_key: str, task: dict):
-    """Optimistic toggle: remember the new status locally, sync in the background.
+def _set_task_done(task: dict, new_value: bool):
+    """Optimistically set a task's completion status and sync in the background.
 
     Trigger 2: on an open -> completed transition, notify the task's creator.
     """
     user = st.session_state["user"]
-    new_value = bool(st.session_state[widget_key])
     future = optimistic.submit_write(
-        "סטטוס משימה", db.set_task_done, task_id, new_value, user
+        "סטטוס משימה", db.set_task_done, task["id"], new_value, user
     )
-    st.session_state.setdefault("task_done_override", {})[task_id] = {
+    st.session_state.setdefault("task_done_override", {})[task["id"]] = {
         "value": new_value,
         "future": future,
     }
@@ -223,6 +222,35 @@ def _toggle_task(task_id: int, widget_key: str, task: dict):
         if toast:
             # Shown on the rerun that follows this callback (see main.py).
             st.session_state["pending_toast"] = toast
+
+
+def _toggle_task(task_id: int, widget_key: str, task: dict):
+    """on_change handler for the 'בוצע' checkbox of an open task."""
+    _set_task_done(task, bool(st.session_state[widget_key]))
+
+
+def _set_task_urgent(task: dict, new_value: bool):
+    """Optimistically flip a task's urgent flag and sync in the background."""
+    future = optimistic.submit_write(
+        "סטטוס דחיפות", db.set_task_urgent, task["id"], new_value
+    )
+    st.session_state.setdefault("task_urgent_override", {})[task["id"]] = {
+        "value": new_value,
+        "future": future,
+    }
+
+
+def _effective_urgent(task: dict) -> bool:
+    """Urgency to display: a pending local toggle wins until the DB confirms it."""
+    overrides = st.session_state.setdefault("task_urgent_override", {})
+    override = overrides.get(task["id"])
+    if override is not None:
+        future = override["future"]
+        landed = bool(task.get("is_urgent")) == override["value"]
+        if future.done() and (future.exception() is not None or landed):
+            overrides.pop(task["id"])  # failed (revert to DB truth) or confirmed
+            override = None
+    return override["value"] if override else bool(task.get("is_urgent"))
 
 
 def _effective_done(task: dict) -> tuple[bool, bool]:
@@ -288,21 +316,54 @@ def _render_task(task: dict, comments: list[dict]):
     if done_key in st.session_state and bool(st.session_state[done_key]) != is_done:
         del st.session_state[done_key]
 
-    check_col, body_col = st.columns([0.06, 0.94])
-    with check_col:
-        st.checkbox(
-            "בוצע",
-            value=is_done,
-            key=done_key,
-            label_visibility="collapsed",
-            on_change=_toggle_task,
-            args=(task["id"], done_key, task),
-            help="סימון המשימה כבוצעה",
-        )
+    is_urgent = _effective_urgent(task)
+
+    # Top-aligned so the status/urgency controls line up with the task title
+    # rather than being centred against the title + metadata block.
+    status_col, urgent_col, body_col = st.columns([0.12, 0.10, 0.78], vertical_alignment="top")
+    with status_col:
+        if is_done:
+            # A prominent green "completed" pill that also un-completes on click,
+            # so the action stays reversible without a second control.
+            if st.button(
+                "✅ הושלם",
+                key=f"task_undone_{task['id']}",
+                help="לחצו לביטול סימון הביצוע",
+            ):
+                _set_task_done(task, False)
+                st.rerun()
+        else:
+            st.checkbox(
+                "בוצע",
+                value=is_done,
+                key=done_key,
+                label_visibility="collapsed",
+                on_change=_toggle_task,
+                args=(task["id"], done_key, task),
+                help="סימון המשימה כבוצעה",
+            )
+    with urgent_col:
+        # Interactive urgency toggle. Two distinct keys (on/off) so each state
+        # can be styled independently in theme.py.
+        if is_urgent:
+            if st.button(
+                "🔥 דחוף",
+                key=f"task_urgent_on_{task['id']}",
+                help="לחצו כדי לבטל את סימון הדחיפות",
+            ):
+                _set_task_urgent(task, False)
+                st.rerun()
+        elif st.button(
+            "🔥",
+            key=f"task_urgent_off_{task['id']}",
+            help="לחצו כדי לסמן את המשימה כדחופה",
+        ):
+            _set_task_urgent(task, True)
+            st.rerun()
     with body_col:
         st.markdown(
             _task_title_html(
-                task["title"], task["assignee"], is_done, task.get("is_urgent", False),
+                task["title"], task["assignee"], is_done,
                 mailto=notifications.build_mailto_link(task, is_done=is_done),
             ),
             unsafe_allow_html=True,
@@ -370,8 +431,9 @@ def _render_task(task: dict, comments: list[dict]):
 
 
 def _render_pending_task(echo: dict):
-    check_col, body_col = st.columns([0.06, 0.94])
-    check_col.markdown("🕓")
+    # No interactive controls yet — the row has no database id until it syncs.
+    status_col, body_col = st.columns([0.22, 0.78], vertical_alignment="center")
+    status_col.markdown("🕓")
     with body_col:
         st.markdown(
             _task_title_html(

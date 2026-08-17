@@ -98,7 +98,7 @@ def test_form_creates_urgent_task(pid):
     at = submit.set_value(True).run()
     assert not at.exception, f"Submit crashed: {at.exception[0]}"
 
-    # Optimistic echo renders the tag immediately, before the DB write lands.
+    # The pending echo renders the inline tag immediately (it has no DB id yet).
     assert any("task-urgent" in (m.value or "") and title in (m.value or "")
                for m in at.markdown), "Urgent tag missing from the optimistic echo"
     print("PASS: urgent checkbox in the form renders the דחוף tag instantly")
@@ -106,9 +106,10 @@ def test_form_creates_urgent_task(pid):
     at = _wait_for_sync(at)
     row = next(t for t in db.get_tasks(project_id=pid) if t["title"] == title)
     assert row["is_urgent"] is True, "Form-created task was not marked urgent in the DB"
-    assert any("task-urgent" in (m.value or "") and title in (m.value or "")
-               for m in at.markdown), "Urgent tag missing after sync"
-    print("PASS: form-created urgent task saved to Supabase and tagged in the list")
+    # Once synced, urgency is shown by the interactive toggle (active state).
+    keys = [b.key for b in at.button if b.key]
+    assert f"task_urgent_on_{row['id']}" in keys, f"Active urgency toggle missing: {keys}"
+    print("PASS: form-created urgent task saved to Supabase and shows the active toggle")
     return at, row
 
 
@@ -120,8 +121,96 @@ def test_completed_urgent_is_dimmed(at, row):
     assert html_blocks, "Task not rendered"
     block = html_blocks[0]
     assert "task-done" in block and "<s>" in block, f"Completed task not struck/dimmed: {block}"
-    assert "task-urgent" in block, "Urgent tag should survive completion"
-    print("PASS: completed urgent task is struck through, dimmed, and keeps its tag")
+    keys = [b.key for b in at.button if b.key]
+    assert f"task_urgent_on_{row['id']}" in keys, "Urgency toggle should survive completion"
+    assert f"task_undone_{row['id']}" in keys, "Completed task should show the green הושלם pill"
+    print("PASS: completed urgent task is struck through, dimmed, and keeps both controls")
+
+
+def test_ui_urgency_toggle(pid):
+    """Flip urgency from the task list, in both directions, through the real UI."""
+    db.add_task("משימה לסימון דחיפות", TEMP_ADMIN, TEMP_ADMIN, pid, "project")
+    db.get_tasks.clear()
+    task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה לסימון דחיפות")
+    assert task["is_urgent"] is False
+
+    at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+    at.session_state["view"] = ("project", pid)
+    at = at.run()
+
+    off_button = next(b for b in at.button if b.key == f"task_urgent_off_{task['id']}")
+    at = off_button.set_value(True).run()
+    assert not at.exception, f"Toggle crashed: {at.exception[0]}"
+    # Optimistic: the active toggle shows before the DB write is confirmed.
+    assert any(b.key == f"task_urgent_on_{task['id']}" for b in at.button), (
+        "Urgency should flip instantly (optimistic)"
+    )
+    print("PASS: clicking the greyed 🔥 marks a task urgent instantly (optimistic)")
+
+    at = _wait_for_sync(at)
+    db.get_tasks.clear()
+    assert next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])["is_urgent"]
+    assert task["id"] not in _ss(at, "task_urgent_override", {}), "Override should be pruned"
+    print("PASS: urgency change synced to Supabase and the override was pruned")
+
+    on_button = next(b for b in at.button if b.key == f"task_urgent_on_{task['id']}")
+    at = on_button.set_value(True).run()
+    assert any(b.key == f"task_urgent_off_{task['id']}" for b in at.button), (
+        "Clicking the active toggle should clear urgency"
+    )
+    at = _wait_for_sync(at)
+    db.get_tasks.clear()
+    assert not next(
+        t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
+    )["is_urgent"]
+    print("PASS: clicking the active 🔥 דחוף clears urgency and syncs")
+    return at, task
+
+
+def test_ui_uncomplete_pill(pid, task):
+    """The green הושלם pill reverts a completed task to open."""
+    at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+    at.session_state["view"] = ("project", pid)
+    at = at.run()
+
+    at.checkbox(key=f"task_done_{task['id']}").set_value(True)
+    at = at.run()
+    assert any(b.key == f"task_undone_{task['id']}" for b in at.button), (
+        "Completed task should show the green הושלם pill instead of a checkbox"
+    )
+    assert not any(c.key == f"task_done_{task['id']}" for c in at.checkbox), (
+        "The checkbox should be replaced once the task is completed"
+    )
+    print("PASS: completing a task replaces the checkbox with the ✅ הושלם pill")
+
+    at = _wait_for_sync(at)
+    undone = next(b for b in at.button if b.key == f"task_undone_{task['id']}")
+    at = undone.set_value(True).run()
+    assert not at.exception, f"Un-complete crashed: {at.exception[0]}"
+    assert any(c.key == f"task_done_{task['id']}" for c in at.checkbox), (
+        "Clicking הושלם should bring the checkbox back (task reopened)"
+    )
+    at = _wait_for_sync(at)
+    db.get_tasks.clear()
+    assert not next(
+        t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
+    )["is_done"], "Un-complete did not sync to the database"
+    print("PASS: clicking ✅ הושלם reopens the task and syncs to Supabase")
+
+
+def test_no_rerun_loop(pid):
+    """Rendering the list repeatedly must be stable (no state churn / rerun loop)."""
+    at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+    at.session_state["view"] = ("project", pid)
+    at = at.run()
+    first = sorted(b.key for b in at.button if b.key)
+    for _ in range(3):
+        at = at.run()
+        assert not at.exception, f"Re-render crashed: {at.exception[0]}"
+    assert sorted(b.key for b in at.button if b.key) == first, "Controls changed between reruns"
+    assert not _ss(at, "task_urgent_override", {}), "Stale urgency overrides left behind"
+    assert not _ss(at, "task_done_override", {}), "Stale completion overrides left behind"
+    print("PASS: repeated reruns are stable — no rerun loop, no stale overrides")
 
 
 if __name__ == "__main__":
@@ -134,6 +223,9 @@ if __name__ == "__main__":
         test_toggle_urgency(pid)
         at, row = test_form_creates_urgent_task(pid)
         test_completed_urgent_is_dimmed(at, row)
+        at, task = test_ui_urgency_toggle(pid)
+        test_ui_uncomplete_pill(pid, task)
+        test_no_rerun_loop(pid)
     finally:
         _cleanup()
     print("\nALL URGENT-TASK TESTS PASSED")
