@@ -138,12 +138,57 @@ def main():
         page.wait_for_timeout(1200)
         task_title = "בדיקת משימה RTL"
         page.get_by_placeholder("משימה חדשה...").fill(task_title)
+
+        # Mark it urgent via the inline toggle (label click — the input is hidden).
+        urgent_box = page.locator('[class*="st-key-task_urgent_"] label').first
+        results.append(("urgent toggle present in the task bar", urgent_box.count() > 0, True))
+        # Inline layout: the toggle must sit on the same row as the input + button.
+        row_geometry = page.evaluate(
+            """() => {
+                // Scope to the task-creation form itself — the sidebar has a form too.
+                const form = document.querySelector('[data-testid="stMain"] [data-testid="stForm"]');
+                if (!form) return null;
+                const input = form.querySelector('input[type="text"]');
+                const chk = form.querySelector('[class*="st-key-task_urgent_"]');
+                const btn = form.querySelector('[data-testid="stFormSubmitButton"] button');
+                if (!input || !chk || !btn) return null;
+                const y = e => e.getBoundingClientRect().y;
+                const x = e => e.getBoundingClientRect().x;
+                return {dy: Math.max(Math.abs(y(input) - y(chk)), Math.abs(y(chk) - y(btn))),
+                        inputX: x(input), chkX: x(chk), btnX: x(btn)};
+            }"""
+        )
+        results.append(
+            ("urgent toggle is inline with input and Add button (RTL order)",
+             bool(row_geometry) and row_geometry["dy"] < 45
+             and row_geometry["inputX"] > row_geometry["chkX"] > row_geometry["btnX"],
+             row_geometry),
+        )
+        urgent_box.click()
+        page.wait_for_timeout(400)
+
         page.locator('[data-testid="stMain"]').get_by_role(
             "button", name="➕ הוספה", exact=True
         ).click()
         page.wait_for_timeout(1200)  # optimistic echo should appear immediately
         echo_visible = page.get_by_text(task_title).count() > 0
         results.append(("optimistic task echo visible in RTL layout", echo_visible, echo_visible))
+
+        # Urgent tag: red pill rendered next to the task name.
+        tag = page.evaluate(
+            """() => {
+                const el = document.querySelector('.task-urgent');
+                if (!el) return null;
+                const s = getComputedStyle(el);
+                return {text: el.textContent.trim(), color: s.color,
+                        background: s.backgroundColor, radius: s.borderTopLeftRadius};
+            }"""
+        )
+        results.append(
+            ("urgent task shows a red 'דחוף' pill",
+             bool(tag) and "דחוף" in tag["text"] and tag["color"] == "rgb(192, 32, 47)",
+             tag),
+        )
 
         # Bidi sanity: an English caption must not have its digits/words reordered.
         caption = page.evaluate(

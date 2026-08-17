@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title         TEXT NOT NULL,
     assignee      TEXT,
     is_done       BOOLEAN NOT NULL DEFAULT FALSE,
+    is_urgent     BOOLEAN NOT NULL DEFAULT FALSE,
     created_by    TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_by  TEXT,
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS project_chat (
 _MIGRATIONS = """
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_urgent BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Allow deleting a user without orphan-FK errors on projects they created,
 -- and let a username change cascade to the projects they created.
@@ -416,16 +418,17 @@ def save_spec(project_id: int, content: str, user: str) -> None:
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_tasks(project_id: int | None = None, task_type: str = "project") -> list[dict]:
+    # Open before done, urgent before regular, newest first.
+    order = "ORDER BY is_done, is_urgent DESC, created_at DESC"
     with get_cursor() as cur:
         if project_id is not None:
             cur.execute(
-                "SELECT * FROM tasks WHERE project_id = %s ORDER BY is_done, created_at DESC",
+                f"SELECT * FROM tasks WHERE project_id = %s {order}",  # noqa: S608
                 (project_id,),
             )
         else:
             cur.execute(
-                "SELECT * FROM tasks WHERE task_type = %s AND project_id IS NULL "
-                "ORDER BY is_done, created_at DESC",
+                f"SELECT * FROM tasks WHERE task_type = %s AND project_id IS NULL {order}",  # noqa: S608
                 (task_type,),
             )
         return cur.fetchall()
@@ -437,15 +440,22 @@ def add_task(
     user: str,
     project_id: int | None = None,
     task_type: str = "project",
+    is_urgent: bool = False,
 ) -> None:
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO tasks (project_id, task_type, title, assignee, created_by)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO tasks (project_id, task_type, title, assignee, created_by, is_urgent)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (project_id, task_type, title, assignee, user),
+            (project_id, task_type, title, assignee, user, is_urgent),
         )
+    get_tasks.clear()
+
+
+def set_task_urgent(task_id: int, urgent: bool) -> None:
+    with get_cursor() as cur:
+        cur.execute("UPDATE tasks SET is_urgent = %s WHERE id = %s", (urgent, task_id))
     get_tasks.clear()
 
 

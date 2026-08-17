@@ -114,6 +114,27 @@ code, pre, [data-testid="stDataFrame"] {
     color: #6b7280;
 }
 
+/* Urgent tasks: small red pill next to the task name. */
+.task-urgent {
+    display: inline-block;
+    background: #fdecec;
+    color: #c0202f;
+    border: 1px solid rgba(192, 32, 47, 0.28);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    margin-inline-end: 0.35rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+/* Keep the "urgent" checkbox in the task bar tight and vertically centred. */
+[data-testid="stMain"] [data-testid="stForm"] [data-testid="stCheckbox"] label {
+    margin-bottom: 0;
+    white-space: nowrap;
+}
+
 /* =======================================================================
    2. Welcome screen — personalized greeting
    ======================================================================= */

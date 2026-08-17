@@ -229,17 +229,20 @@ def _effective_done(task: dict) -> tuple[bool, bool]:
     return bool(task["is_done"]), False
 
 
-def _task_title_html(title: str, assignee: str | None, is_done: bool) -> str:
-    """Task title: bold when open, struck through and dimmed when completed."""
+def _task_title_html(
+    title: str, assignee: str | None, is_done: bool, is_urgent: bool = False
+) -> str:
+    """Task title: urgent tag first, bold when open, struck through + dimmed when done."""
     safe_title = html.escape(title)
-    body = (
-        f'<span class="task-done"><s>{safe_title}</s></span>'
-        if is_done
-        else f"<strong>{safe_title}</strong>"
-    )
+    parts = []
+    if is_urgent:
+        parts.append('<span class="task-urgent">🔥 דחוף</span>')
+    parts.append(f"<s>{safe_title}</s>" if is_done else f"<strong>{safe_title}</strong>")
     if assignee:
-        body += f" · 👤 <code>{html.escape(assignee)}</code>"
-    return body
+        parts.append(f"· 👤 <code>{html.escape(assignee)}</code>")
+    body = " ".join(parts)
+    # When completed, dim the whole line (tag and assignee included).
+    return f'<span class="task-done">{body}</span>' if is_done else body
 
 
 def _render_task(task: dict, comments: list[dict]):
@@ -264,7 +267,9 @@ def _render_task(task: dict, comments: list[dict]):
         )
     with body_col:
         st.markdown(
-            _task_title_html(task["title"], task["assignee"], is_done),
+            _task_title_html(
+                task["title"], task["assignee"], is_done, task.get("is_urgent", False)
+            ),
             unsafe_allow_html=True,
         )
 
@@ -334,7 +339,10 @@ def _render_pending_task(echo: dict):
     check_col.markdown("🕓")
     with body_col:
         st.markdown(
-            _task_title_html(echo["title"], echo["assignee"], is_done=False),
+            _task_title_html(
+                echo["title"], echo["assignee"], is_done=False,
+                is_urgent=echo.get("is_urgent", False),
+            ),
             unsafe_allow_html=True,
         )
         st.caption("מסתנכרן עם מסד הנתונים…")
@@ -347,7 +355,9 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
 
     # --- Add a task --------------------------------------------------------
     with st.form(f"add_task_form_{scope}", clear_on_submit=True, border=False):
-        title_col, assignee_col, button_col = st.columns([0.58, 0.24, 0.18])
+        title_col, assignee_col, urgent_col, button_col = st.columns(
+            [0.47, 0.21, 0.14, 0.18], vertical_alignment="center"
+        )
         title = title_col.text_input(
             "משימה", placeholder="משימה חדשה...", label_visibility="collapsed",
             key=f"task_title_{scope}",
@@ -356,14 +366,21 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
             "אחראי/ת", db.get_users(), label_visibility="collapsed",
             key=f"task_assignee_{scope}",
         )
+        is_urgent = urgent_col.checkbox(
+            "🔥 דחוף", key=f"task_urgent_{scope}", help="סימון המשימה כדחופה"
+        )
         if button_col.form_submit_button("➕ הוספה", use_container_width=True):
             text = title.strip()
             if text:
                 future = optimistic.submit_write(
-                    f"משימה '{text}'", db.add_task, text, assignee, user, project_id, task_type
+                    f"משימה '{text}'", db.add_task, text, assignee, user,
+                    project_id, task_type, is_urgent,
                 )
                 st.session_state.setdefault(echo_key, []).append(
-                    {"title": text, "assignee": assignee, "created_by": user, "future": future}
+                    {
+                        "title": text, "assignee": assignee, "created_by": user,
+                        "is_urgent": is_urgent, "future": future,
+                    }
                 )
                 st.rerun()
 

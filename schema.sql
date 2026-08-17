@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title         TEXT NOT NULL,
     assignee      TEXT,
     is_done       BOOLEAN NOT NULL DEFAULT FALSE,
+    is_urgent     BOOLEAN NOT NULL DEFAULT FALSE,
     created_by    TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_by  TEXT,
