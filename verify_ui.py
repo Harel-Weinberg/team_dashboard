@@ -116,15 +116,56 @@ def main():
                        if (!el) return null;
                        const s = getComputedStyle(el);
                        return {radius: parseFloat(s.borderTopLeftRadius),
-                               shadow: s.boxShadow.slice(0, 40),
-                               border: s.borderColor,
-                               blur: (s.backdropFilter || '').includes('blur')}; }"""
+                               background: s.backgroundColor,
+                               shadow: s.boxShadow.slice(0, 44)}; }"""
         )
         results.append(
-            ("widget is an Apple-style glass card (rounded, soft shadow, blur)",
-             bool(widget_style) and widget_style["radius"] >= 16
-             and "rgba" in widget_style["shadow"] and widget_style["blur"],
+            ("widget is a stark-white Apple card (24px, 8/24 soft shadow)",
+             bool(widget_style) and widget_style["radius"] >= 20
+             and widget_style["background"] == "rgb(255, 255, 255)"
+             and "0px 8px 24px" in widget_style["shadow"],
              widget_style),
+        )
+
+        # The widget must sit ABOVE the project bubbles (critical items first).
+        order = page.evaluate(
+            """() => {
+                const w = document.querySelector('.st-key-urgent_widget');
+                const b = document.querySelector('.st-key-project_bubbles');
+                if (!w || !b) return null;
+                return {widgetY: w.getBoundingClientRect().y,
+                        bubblesY: b.getBoundingClientRect().y};
+            }"""
+        )
+        results.append(
+            ("urgent widget renders ABOVE the project bubbles",
+             bool(order) and order["widgetY"] < order["bubblesY"], order),
+        )
+
+        # Redesign: buttons are fully-rounded white pills; bubbles are pure white.
+        shapes = page.evaluate(
+            """() => {
+                const nav = document.querySelector('.st-key-nav_urgent button');
+                const bub = document.querySelector('.st-key-project_bubbles button');
+                if (!nav || !bub) return null;
+                const ns = getComputedStyle(nav), bs = getComputedStyle(bub);
+                return {navRadius: parseFloat(ns.borderTopLeftRadius),
+                        navBg: ns.backgroundColor, navBorder: ns.borderTopWidth,
+                        bubbleBg: bs.backgroundColor,
+                        bubbleShadow: bs.boxShadow.slice(0, 44)};
+            }"""
+        )
+        results.append(
+            ("nav buttons are borderless fully-rounded white pills",
+             bool(shapes) and shapes["navRadius"] >= 100
+             and shapes["navBg"] == "rgb(255, 255, 255)" and shapes["navBorder"] == "0px",
+             shapes),
+        )
+        results.append(
+            ("project bubbles are stark white with the 8/24 shadow",
+             bool(shapes) and shapes["bubbleBg"] == "rgb(255, 255, 255)"
+             and "0px 8px 24px" in shapes["bubbleShadow"],
+             shapes),
         )
 
         # --- Emoji placement: the leading emoji must be the RIGHTMOST glyph -------

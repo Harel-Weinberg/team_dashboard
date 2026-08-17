@@ -35,15 +35,26 @@ html, body, .stApp, [data-testid="stSidebar"] {
                  "Heebo", "Helvetica Neue", Arial, sans-serif;
 }
 
+/* Light, airy pastel canvas: icy blue -> pale lavender -> clean white.
+   Cards sit on top as stark WHITE surfaces lifted by soft shadows, so the
+   hierarchy reads instantly (background = canvas, white = interactive). */
 .stApp {
     background:
-        radial-gradient(circle at 12% 10%, rgba(79, 181, 204, 0.10) 0%, rgba(79, 181, 204, 0) 42%),
-        radial-gradient(circle at 88% 85%, rgba(167, 30, 133, 0.07) 0%, rgba(167, 30, 133, 0) 48%),
-        linear-gradient(180deg, #f7f8fb 0%, #f1f2f7 100%);
+        radial-gradient(circle at 12% 8%, rgba(79, 181, 204, 0.13) 0%, rgba(79, 181, 204, 0) 40%),
+        radial-gradient(circle at 90% 90%, rgba(167, 30, 133, 0.06) 0%, rgba(167, 30, 133, 0) 45%),
+        linear-gradient(180deg, #e9f2fb 0%, #f2eefa 48%, #fbfcfe 100%);
+}
+
+/* Deep, highly readable purple-black text. */
+[data-testid="stMain"] .block-container,
+[data-testid="stSidebar"],
+[data-testid="stMain"] h1, [data-testid="stMain"] h2,
+[data-testid="stMain"] h3, [data-testid="stMain"] h4 {
+    color: #23213a;
 }
 
 [data-testid="stMain"] .block-container {
-    padding-top: 3.2rem;
+    padding-top: 3.4rem;
     padding-bottom: 4rem;
     max-width: 1120px;
 }
@@ -153,108 +164,116 @@ code, pre, [data-testid="stDataFrame"] {
    2. Apple-style components
    ======================================================================= */
 
-/* Sidebar: frosted glass panel. */
+/* Sidebar: clean white panel lifted by a shadow (no border). */
 [data-testid="stSidebar"] {
-    background: rgba(255, 255, 255, 0.68);
-    backdrop-filter: saturate(180%) blur(22px);
-    -webkit-backdrop-filter: saturate(180%) blur(22px);
-    border-inline-start: 1px solid rgba(0, 0, 0, 0.05);
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+    background: #ffffff;
+    border-inline-start: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 [data-testid="stSidebarContent"] {
-    padding: 0.6rem 0.4rem;
+    padding: 0.7rem 0.5rem;
 }
 
-/* Buttons: rounded, soft border, gentle hover lift. */
+/* Buttons: fully rounded white pills — no borders, shadow for lift. */
 [data-testid="stMain"] [data-testid="stBaseButton-secondary"],
 [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"],
 [data-testid="stFormSubmitButton"] button {
-    border-radius: 12px;
-    border: 1px solid rgba(0, 0, 0, 0.07);
-    background: rgba(255, 255, 255, 0.85);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+    border-radius: 999px;
+    border: none;
+    background: #ffffff;
+    color: #23213a;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
     transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 [data-testid="stMain"] [data-testid="stBaseButton-secondary"]:hover,
 [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover,
 [data-testid="stFormSubmitButton"] button:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+    color: #23213a;
 }
-/* Primary buttons / selected nav: Apple blue. */
+/* Primary buttons / selected nav: Apple blue pill. */
 [data-testid="stBaseButton-primary"] {
     background: #0a84ff !important;
     color: #ffffff !important;
     border: none !important;
-    border-radius: 12px;
-    box-shadow: 0 4px 14px rgba(10, 132, 255, 0.30);
+    border-radius: 999px;
+    box-shadow: 0 6px 18px rgba(10, 132, 255, 0.32);
 }
 [data-testid="stBaseButton-primary"]:hover {
     background: #339dff !important;
 }
 
-/* Inputs & selects: rounded, translucent. */
+/* Inputs & selects: rounded white, hairline-free (shadow instead of border). */
 [data-testid="stMain"] [data-baseweb="input"],
 [data-testid="stSidebar"] [data-baseweb="input"],
 [data-testid="stMain"] [data-baseweb="select"] > div,
 [data-testid="stSidebar"] [data-baseweb="select"] > div,
-[data-testid="stMain"] [data-baseweb="textarea"],
+[data-testid="stMain"] [data-baseweb="textarea"] {
+    border-radius: 14px;
+    background: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
 [data-testid="stChatInput"] {
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.85);
-    border-color: rgba(0, 0, 0, 0.08);
+    border-radius: 16px;
+    background: #ffffff;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 
-/* Tabs: iOS-style segmented control. */
+/* Tabs: iOS-style segmented control (pill track, white selected pill). */
 [data-testid="stTabs"] [data-baseweb="tab-list"] {
-    background: rgba(120, 120, 128, 0.10);
-    border-radius: 12px;
-    padding: 3px;
-    gap: 3px;
+    background: rgba(35, 33, 58, 0.06);
+    border-radius: 999px;
+    padding: 4px;
+    gap: 4px;
     width: fit-content;
 }
 [data-testid="stTabs"] [data-baseweb="tab"] {
-    border-radius: 10px;
-    padding: 0.35rem 0.9rem;
+    border-radius: 999px;
+    padding: 0.35rem 1.0rem;
 }
 [data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
     background: #ffffff;
-    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.12);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.10);
 }
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {
     display: none;
 }
 
-/* Expanders (task notes): floating glass cards. */
+/* Expanders (task notes): white rounded cards. */
 [data-testid="stExpander"] {
     border-radius: 16px;
-    border: 1px solid rgba(0, 0, 0, 0.05);
-    background: rgba(255, 255, 255, 0.72);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+    border: none;
+    background: #ffffff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
     overflow: hidden;
 }
 [data-testid="stExpander"] details {
     border: none;
 }
-
-/* Chat: message bubbles. */
-[data-testid="stChatMessage"] {
-    background: rgba(255, 255, 255, 0.78);
-    border-radius: 18px;
-    padding: 0.85rem 1.05rem;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
-    margin-bottom: 0.45rem;
+/* Forms nested inside cards must not stack another card on top. */
+[data-testid="stExpander"] [data-testid="stForm"] {
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
 }
-[data-testid="stChatInput"] {
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+
+/* Chat: white message cards. */
+[data-testid="stChatMessage"] {
+    background: #ffffff;
+    border-radius: 20px;
+    padding: 0.9rem 1.1rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    margin-bottom: 0.55rem;
 }
 
 /* Tables. */
 [data-testid="stDataFrame"] {
-    border-radius: 14px;
+    border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 
 /* Completed tasks: struck through (inline <s>) and dimmed. */
@@ -370,7 +389,7 @@ a.task-mail:hover {
     font-size: 2.1rem;
     font-weight: 700;
     letter-spacing: -0.02em;
-    color: #1c2430;
+    color: #23213a;
     margin: 0.2rem 0 0.1rem 0;
     text-align: right;
     direction: rtl;
@@ -386,7 +405,7 @@ a.task-mail:hover {
     font-size: 1.15rem;
     font-weight: 700;
     letter-spacing: -0.01em;
-    color: #1c2430;
+    color: #23213a;
     margin: 1.1rem 0 0.9rem 0;
     text-align: right;
     direction: rtl;
@@ -397,13 +416,12 @@ a.task-mail:hover {
     direction: rtl;
     width: 100%;
     min-height: 116px;
-    padding: 1.35rem 1.3rem 1.15rem;
-    border: 1px solid rgba(0, 0, 0, 0.04);
+    padding: 1.4rem 1.35rem 1.2rem;
+    border: none;
     border-radius: 24px;
-    background: rgba(255, 255, 255, 0.82);
-    backdrop-filter: saturate(180%) blur(18px);
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
-    color: #1c2430;
+    background: #ffffff;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    color: #23213a;
     font-size: 1.05rem;
     font-weight: 600;
     text-align: right;
@@ -433,9 +451,8 @@ a.task-mail:hover {
 }
 .st-key-project_bubbles [data-testid="stButton"] button:hover {
     transform: translateY(-6px);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.12);
-    border-color: rgba(0, 0, 0, 0.08);
-    color: #1c2430;
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12);
+    color: #23213a;
 }
 .st-key-project_bubbles [data-testid="stButton"] button:active {
     transform: translateY(-2px);
@@ -446,27 +463,26 @@ a.task-mail:hover {
     margin: 0;
 }
 
-/* Urgent-tasks widget: glass card with red-tinted mini-card rows. */
+/* Urgent-tasks widget: white Apple card with red-tinted mini-card rows. */
 .st-key-urgent_widget {
-    background: rgba(255, 255, 255, 0.75);
-    backdrop-filter: saturate(180%) blur(18px);
-    border: 1px solid rgba(255, 59, 48, 0.14);
-    border-radius: 20px;
-    padding: 1.05rem 1.15rem;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+    background: #ffffff;
+    border: none;
+    border-radius: 24px;
+    padding: 1.15rem 1.25rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 .st-key-urgent_widget [data-testid="stButton"] button {
     direction: rtl;
     width: 100%;
-    background: rgba(255, 59, 48, 0.05);
-    border: 1px solid rgba(255, 59, 48, 0.10);
-    border-radius: 14px;
-    padding: 0.55rem 0.9rem;
+    background: rgba(255, 59, 48, 0.055);
+    border: none;
+    border-radius: 16px;
+    padding: 0.6rem 0.95rem;
     text-align: right;
     justify-content: flex-start;
     white-space: normal;
     line-height: 1.45;
-    color: #1c2430;
+    color: #23213a;
     box-shadow: none;
     transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }

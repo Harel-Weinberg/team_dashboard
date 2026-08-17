@@ -625,6 +625,10 @@ def render_welcome():
         unsafe_allow_html=True,
     )
 
+    # Critical items first: the urgent widget sits ABOVE the project bubbles so
+    # open urgent tasks are the first thing the user sees after logging in.
+    _render_urgent_widget()
+
     projects = db.get_projects()
     pending_projects = st.session_state.get("optimistic_projects", [])
 
@@ -632,7 +636,7 @@ def render_welcome():
         st.info("עדיין אין פרויקטים — הוסיפו פרויקט חדש מהסרגל הימני.")
         return
 
-    st.markdown('<div class="welcome-section-title">הפרויקטים שלנו</div>', unsafe_allow_html=True)
+    st.markdown('<div class="welcome-section-title">📁 הפרויקטים שלנו</div>', unsafe_allow_html=True)
 
     # Each bubble is a full-size button styled as a floating card (see theme.py),
     # so a click navigates straight into the project dashboard.
@@ -662,8 +666,6 @@ def render_welcome():
                     if st.button(bubble["label"], key=bubble["key"], use_container_width=True):
                         st.session_state["view"] = bubble["view"]
                         st.rerun()
-
-    _render_urgent_widget()
 
     st.caption(
         "כל שינוי מתועד עם השם והשעה ומסונכרן לענן — לחצו 🔄 רענון כדי לשלוף עדכונים מהצוות."
