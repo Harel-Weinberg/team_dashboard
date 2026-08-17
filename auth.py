@@ -68,7 +68,9 @@ def require_login() -> bool:
 
 
 def logout() -> None:
-    st.session_state.pop("user", None)
-    st.session_state.pop("role", None)
-    st.session_state.pop("view", None)
+    for key in list(st.session_state.keys()):
+        if key in ("user", "role", "view", "task_done_override", "_pending_writes") or str(
+            key
+        ).startswith("optimistic_"):
+            st.session_state.pop(key, None)
     st.rerun()

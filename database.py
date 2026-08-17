@@ -279,6 +279,18 @@ def add_project(name: str, user: str) -> int | None:
         return None
 
 
+def delete_project(project_id: int) -> None:
+    """Remove a project and (via ON DELETE CASCADE) its spec, tasks, comments and chat."""
+    with get_cursor() as cur:
+        cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+    get_projects.clear()
+    get_project.clear()
+    get_spec.clear()
+    get_tasks.clear()
+    get_comments_map.clear()
+    get_chat.clear()
+
+
 # ---------------------------------------------------------------------------
 # Specs (Module A)
 # ---------------------------------------------------------------------------

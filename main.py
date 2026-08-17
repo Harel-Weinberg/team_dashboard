@@ -9,6 +9,7 @@ import streamlit as st
 import admin_ui
 import auth
 import database as db
+import optimistic
 import ui_components as ui
 
 st.set_page_config(
@@ -33,7 +34,10 @@ def main():
     if not auth.require_login():
         st.stop()
 
-    # 3. Navigation + routing.
+    # 3. Surface any failed background (optimistic) writes from earlier actions.
+    optimistic.report_sync_failures()
+
+    # 4. Navigation + routing.
     view = ui.render_sidebar()
 
     if view == "urgent":
@@ -50,6 +54,8 @@ def main():
         )
     elif view == "users":
         admin_ui.render_user_management()
+    elif isinstance(view, tuple) and view[0] == "pending_project":
+        ui.render_pending_project(view[1])
     elif isinstance(view, tuple) and view[0] == "project":
         project = db.get_project(view[1])
         if project is None:
