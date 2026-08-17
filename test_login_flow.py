@@ -31,8 +31,8 @@ def current_user(at: AppTest):
 
 
 def login(at: AppTest, username: str, password: str) -> AppTest:
-    at.selectbox[0].select(username)
-    at.text_input[0].set_value(password)
+    at.text_input[0].set_value(username)
+    at.text_input[1].set_value(password)
     return at.button[0].set_value(True).run()
 
 
@@ -54,15 +54,19 @@ def cleanup():
 def test_login_screen_renders():
     at = new_app()
     assert not at.exception, f"App crashed on load: {at.exception[0] if at.exception else ''}"
-    users = at.selectbox[0].options
-    assert "Harel" in users and "Yitzhak" in users, f"Expected team users in: {users}"
-    print("PASS: login screen renders, DB users:", users)
+    assert len(at.text_input) >= 2, "Expected username + password inputs"
+    assert any(
+        "AI &amp; Tech Innovation" in (m.value or "") or "AI & Tech Innovation" in (m.value or "")
+        for m in at.markdown
+    ), "Expected the branded login header"
+    assert at.button and at.button[0].label == "כניסה", "Expected the Hebrew submit button"
+    print("PASS: styled login screen renders (logo header, 2 inputs, כניסה button)")
 
 
 def test_wrong_password_rejected():
     at = login(new_app(), "Harel", "definitely-wrong-password")
     assert not current_user(at), "User must NOT be logged in"
-    assert at.error and "Incorrect password" in at.error[0].value
+    assert at.error and "Incorrect" in at.error[0].value
     print("PASS: wrong password rejected")
 
 
