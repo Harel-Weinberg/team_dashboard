@@ -10,6 +10,7 @@ import admin_ui
 import auth
 import database as db
 import optimistic
+import theme
 import ui_components as ui
 
 st.set_page_config(
@@ -34,7 +35,10 @@ def main():
     if not auth.require_login():
         st.stop()
 
-    # 3. Surface any failed background (optimistic) writes from earlier actions.
+    # 3. Global RTL (Hebrew) layout + component styling.
+    theme.inject_app_css()
+
+    # 4. Surface any failed background (optimistic) writes from earlier actions.
     optimistic.report_sync_failures()
 
     # 4. Navigation + routing.

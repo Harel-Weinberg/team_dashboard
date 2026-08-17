@@ -440,18 +440,53 @@ def render_adhoc_board(title: str, subtitle: str, task_type: str):
 
 
 def render_welcome():
-    st.title("🚀 AI & Tech Innovation — Team Dashboard")
+    """Personalized greeting + floating project bubbles (main screen)."""
+    user = st.session_state["user"]
+
     st.markdown(
-        """
-        Welcome! Use the sidebar to get started:
+        f'<div class="welcome-greeting">ברוך הבא, {user} 👋</div>'
+        '<div class="welcome-sub">צוות AI וחדשנות · דשבורד ניהול משימות</div>',
+        unsafe_allow_html=True,
+    )
 
-        - **📁 Projects Hub** — open a project to see its spec, tasks and chat.
-        - **➕ Add New Project** — create a new project (e.g. *AI Bot*, *Document Converter*).
-        - **🔥 Urgent Tasks** — ad-hoc critical bugs and daily urgent items.
-        - **💡 Future Backlog** — ideas and long-term features.
+    projects = db.get_projects()
+    pending_projects = st.session_state.get("optimistic_projects", [])
 
-        Every change is tagged with your name and a timestamp, and syncs
-        instantly to the cloud database — click **🔄 Refresh** to pull your
-        teammate's latest updates.
-        """
+    if not projects and not pending_projects:
+        st.info("עדיין אין פרויקטים — הוסיפו פרויקט חדש מהסרגל הימני.")
+        return
+
+    st.markdown('<div class="welcome-section-title">הפרויקטים שלנו</div>', unsafe_allow_html=True)
+
+    # Each bubble is a full-size button styled as a floating card (see theme.py),
+    # so a click navigates straight into the project dashboard.
+    bubbles = [
+        {
+            "label": f"📂 **{p['name']}**\n\nנוצר על ידי {p['created_by']} · {fmt_ts(p['created_at'])}",
+            "key": f"bubble_project_{p['id']}",
+            "view": ("project", p["id"]),
+        }
+        for p in projects
+    ] + [
+        {
+            "label": f"🕓 **{e['name']}**\n\nנשמר כרגע במסד הנתונים…",
+            "key": f"bubble_pending_{e['temp_id']}",
+            "view": ("pending_project", e["temp_id"]),
+        }
+        for e in pending_projects
+    ]
+
+    per_row = 3
+    with st.container(key="project_bubbles"):
+        for start in range(0, len(bubbles), per_row):
+            row = bubbles[start : start + per_row]
+            columns = st.columns(per_row, gap="medium")
+            for column, bubble in zip(columns, row):
+                with column:
+                    if st.button(bubble["label"], key=bubble["key"], use_container_width=True):
+                        st.session_state["view"] = bubble["view"]
+                        st.rerun()
+
+    st.caption(
+        "כל שינוי מתועד עם השם והשעה ומסונכרן לענן — לחצו 🔄 רענון כדי לשלוף עדכונים מהצוות."
     )
