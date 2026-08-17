@@ -20,6 +20,7 @@ the main script thread reads the Futures.
 
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 
 import streamlit as st
 
@@ -38,6 +39,31 @@ def submit_write(description: str, fn: Callable, /, *args, **kwargs) -> Future:
         {"future": future, "description": description}
     )
     return future
+
+
+def wait_for_pending(timeout: float = 8.0) -> bool:
+    """Block until tracked background writes finish. Returns True if all landed.
+
+    Used before operations that must not race with in-flight writes — e.g.
+    renaming a user, where a late write would still carry the old username.
+    """
+    futures = [item["future"] for item in st.session_state.get(_PENDING_KEY, [])]
+    if not futures:
+        return True
+    _, not_done = futures_wait(futures, timeout=timeout)
+    return not not_done
+
+
+def discard_echoes() -> None:
+    """Drop local echo overlays (their writes already went to the database).
+
+    Called after a username change: echoes are matched against the DB by
+    author name, so stale echoes tagged with the old name would never be
+    pruned and would linger as visual duplicates.
+    """
+    for key in [k for k in st.session_state if str(k).startswith("optimistic_")]:
+        st.session_state.pop(key, None)
+    st.session_state.pop("task_done_override", None)
 
 
 def report_sync_failures() -> None:

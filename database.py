@@ -138,11 +138,26 @@ _MIGRATIONS = """
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
 
--- Allow deleting a user without orphan-FK errors on projects they created.
+-- Allow deleting a user without orphan-FK errors on projects they created,
+-- and let a username change cascade to the projects they created.
 ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_created_by_fkey;
 ALTER TABLE projects ADD CONSTRAINT projects_created_by_fkey
-    FOREIGN KEY (created_by) REFERENCES users(username) ON DELETE SET NULL;
+    FOREIGN KEY (created_by) REFERENCES users(username)
+    ON DELETE SET NULL ON UPDATE CASCADE;
 """
+
+# Every column that stores a username as identity-tagging metadata. Renaming a
+# user rewrites all of them so historical attribution is never orphaned.
+# These are hard-coded table/column literals — never user input.
+_IDENTITY_COLUMNS = (
+    ("projects", "created_by"),
+    ("specs", "updated_by"),
+    ("tasks", "assignee"),
+    ("tasks", "created_by"),
+    ("tasks", "completed_by"),
+    ("task_comments", "author"),
+    ("project_chat", "sender"),
+)
 
 # Seeded only when the users table is empty (or a legacy row has no password),
 # so the team can never be locked out. Change these passwords from the UI.
@@ -205,6 +220,77 @@ def get_users_detailed() -> list[dict]:
 def _clear_user_caches() -> None:
     get_users.clear()
     get_users_detailed.clear()
+
+
+def clear_all_caches() -> None:
+    """Clear every cached reader (used after a change that touches many tables)."""
+    for cached in (
+        get_users, get_users_detailed, get_projects, get_project,
+        get_spec, get_tasks, get_comments_map, get_chat,
+    ):
+        cached.clear()
+
+
+def username_exists(username: str, exclude: str | None = None) -> bool:
+    """Case-insensitive existence check, optionally ignoring one existing name."""
+    with get_cursor() as cur:
+        if exclude is not None:
+            cur.execute(
+                "SELECT 1 FROM users WHERE LOWER(username) = LOWER(%s) AND username <> %s",
+                (username, exclude),
+            )
+        else:
+            cur.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(%s)", (username,))
+        return cur.fetchone() is not None
+
+
+def rename_user(old_username: str, new_username: str) -> int | None:
+    """Rename a user and re-attribute all of their historical actions.
+
+    Runs as a single transaction, in an order that satisfies the foreign key
+    on projects.created_by without depending on ON UPDATE CASCADE (so it also
+    works on a database whose schema was created by hand):
+
+        1. copy the users row under the new name (password, role, created_at),
+        2. repoint every identity column to the new name,
+        3. delete the old users row.
+
+    Returns the number of re-attributed rows, or None if the new name is
+    already taken / the old user no longer exists.
+    """
+    try:
+        with get_cursor() as cur:
+            reattributed = 0
+            for table, column in _IDENTITY_COLUMNS:
+                cur.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE {column} = %s",  # noqa: S608
+                    (old_username,),
+                )
+                reattributed += cur.fetchone()["n"]
+
+            cur.execute(
+                """
+                INSERT INTO users (username, password_hash, role, created_at)
+                SELECT %s, password_hash, role, created_at
+                FROM users WHERE username = %s
+                """,
+                (new_username, old_username),
+            )
+            if cur.rowcount == 0:
+                return None  # user disappeared (e.g. deleted by the other admin)
+
+            for table, column in _IDENTITY_COLUMNS:
+                cur.execute(
+                    f"UPDATE {table} SET {column} = %s WHERE {column} = %s",  # noqa: S608
+                    (new_username, old_username),
+                )
+
+            cur.execute("DELETE FROM users WHERE username = %s", (old_username,))
+    except psycopg2.errors.UniqueViolation:
+        return None
+
+    clear_all_caches()
+    return reattributed
 
 
 def add_user(username: str, password_hash: str, role: str = "user") -> bool:
