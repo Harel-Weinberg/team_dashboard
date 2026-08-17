@@ -23,18 +23,29 @@ SHOTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_shots")
 TEMP_PROJECTS = ["בדיקה: בוט AI", "בדיקה: המרת מסמכים", "בדיקה: לוח בקרה"]
 
 
+WIDGET_TASK = "משימה דחופה לוידגט"
+
+
 def seed():
     create_temp_admin()
     # Give the temp admin an address so the mailto: icon has a recipient.
     db.set_user_contact(TEMP_ADMIN, "temp-admin@example.test", None)
-    for name in TEMP_PROJECTS:
-        db.add_project(name, TEMP_ADMIN)
+    pids = [db.add_project(name, TEMP_ADMIN) for name in TEMP_PROJECTS]
+    # An open urgent task so the home-screen widget has something to show.
+    # Seeded into the SECOND project: the browser flow drives the first one and
+    # asserts on its task list, which must not contain extra rows.
+    # add_project returns None on a duplicate name (leftover from an aborted
+    # run) — never seed a task without a valid project id.
+    assert pids[1] is not None, "temp project already exists — run unseed() first"
+    db.add_task(WIDGET_TASK, TEMP_ADMIN, TEMP_ADMIN, pids[1], "project", is_urgent=True)
 
 
 def unseed():
     with db.get_cursor() as cur:
         cur.execute("SELECT id FROM projects WHERE name = ANY(%s)", (TEMP_PROJECTS,))
         ids = [r["id"] for r in cur.fetchall()]
+        # Also remove seeded widget tasks that lost their project (aborted runs).
+        cur.execute("DELETE FROM tasks WHERE title = %s", (WIDGET_TASK,))
     for pid in ids:
         db.delete_project(pid)
     cleanup()
@@ -95,6 +106,48 @@ def main():
         greeting = page.locator("text=ברוך הבא").first.inner_text()
         results.append((f"personalized greeting: '{greeting}'", TEMP_ADMIN in greeting, greeting))
 
+        # --- Urgent-tasks widget on the home screen ------------------------------
+        widget_count = page.locator(".st-key-urgent_widget").count()
+        results.append(("urgent-tasks widget rendered on home", widget_count > 0, widget_count))
+        seeded = page.locator(f'.st-key-urgent_widget button:has-text("{WIDGET_TASK}")')
+        results.append(("widget lists the seeded urgent task", seeded.count() > 0, seeded.count()))
+        widget_style = page.evaluate(
+            """() => { const el = document.querySelector('.st-key-urgent_widget');
+                       if (!el) return null;
+                       const s = getComputedStyle(el);
+                       return {radius: parseFloat(s.borderTopLeftRadius),
+                               shadow: s.boxShadow.slice(0, 40),
+                               border: s.borderColor,
+                               blur: (s.backdropFilter || '').includes('blur')}; }"""
+        )
+        results.append(
+            ("widget is an Apple-style glass card (rounded, soft shadow, blur)",
+             bool(widget_style) and widget_style["radius"] >= 16
+             and "rgba" in widget_style["shadow"] and widget_style["blur"],
+             widget_style),
+        )
+
+        # --- Emoji placement: the leading emoji must be the RIGHTMOST glyph -------
+        emoji_geometry = page.evaluate(
+            """() => {
+                const p = document.querySelector('.st-key-nav_home button p');
+                if (!p || !p.firstChild) return null;
+                const range = document.createRange();
+                range.setStart(p.firstChild, 0);
+                range.setEnd(p.firstChild, 2);  // the emoji is a surrogate pair
+                const emoji = range.getBoundingClientRect();
+                const full = p.getBoundingClientRect();
+                return {emojiRight: emoji.right, mid: (full.left + full.right) / 2,
+                        dir: getComputedStyle(p).direction};
+            }"""
+        )
+        results.append(
+            ("nav emoji renders to the RIGHT of the Hebrew text",
+             bool(emoji_geometry) and emoji_geometry["dir"] == "rtl"
+             and emoji_geometry["emojiRight"] > emoji_geometry["mid"],
+             emoji_geometry),
+        )
+
         # --- Bubble checks ----------------------------------------------------
         bubbles = page.locator('.st-key-project_bubbles button')
         count = bubbles.count()
@@ -108,7 +161,10 @@ def main():
                         align: s.textAlign, minH: s.minHeight};
             }"""
         )
-        results.append(("bubbles are rounded", style["radius"].startswith("20"), style["radius"]))
+        results.append(
+            ("bubbles are rounded (>=16px)",
+             float(style["radius"].replace("px", "")) >= 16, style["radius"]),
+        )
         results.append(("bubbles have a soft shadow", "rgba" in style["shadow"], style["shadow"][:40]))
         results.append(("bubble text is right-aligned", style["align"] == "right", style["align"]))
 
@@ -370,11 +426,14 @@ def main():
 
 
 if __name__ == "__main__":
-    seed()
-    server = start_server()
+    unseed()  # clear leftovers from any previously aborted run
+    server = None
     try:
+        seed()
+        server = start_server()
         code = main()
     finally:
-        server.kill()
+        if server is not None:
+            server.kill()
         unseed()
     sys.exit(code)

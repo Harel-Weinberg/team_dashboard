@@ -79,7 +79,7 @@ def render_sidebar():
 
     with st.sidebar:
         st.markdown("## 🚀 צוות AI וחדשנות")
-        st.caption(f"מחובר/ת: **{user}** {AVATARS.get(user, DEFAULT_AVATAR)}")
+        st.caption(f"{AVATARS.get(user, DEFAULT_AVATAR)} מחובר/ת: **{user}**")
 
         # --- Home ---------------------------------------------------------
         on_home = st.session_state.get("view") is None
@@ -386,11 +386,14 @@ def _render_task(task: dict, comments: list[dict]):
         comment_echoes[task["id"]] = pending_comments
 
         with st.expander(f"💬 הערות ({len(comments) + len(pending_comments)})"):
+            # dir="rtl" keeps the avatar emoji on the right even when the
+            # author's name is Latin (which would otherwise flip the line LTR).
             for comment in comments:
                 avatar = AVATARS.get(comment["author"], DEFAULT_AVATAR)
                 st.markdown(
-                    f"{avatar} **{comment['author']}** · "
-                    f"<small>{fmt_ts(comment['created_at'])}</small>",
+                    f'<span dir="rtl">{avatar} '
+                    f"<strong>{html.escape(comment['author'] or '')}</strong> · "
+                    f"<small>{fmt_ts(comment['created_at'])}</small></span>",
                     unsafe_allow_html=True,
                 )
                 st.markdown(comment["content"])
@@ -398,7 +401,9 @@ def _render_task(task: dict, comments: list[dict]):
             for echo in pending_comments:
                 avatar = AVATARS.get(echo["author"], DEFAULT_AVATAR)
                 st.markdown(
-                    f"{avatar} **{echo['author']}** · <small>🕓 נשלח…</small>",
+                    f'<span dir="rtl">{avatar} '
+                    f"<strong>{html.escape(echo['author'])}</strong> · "
+                    "<small>🕓 נשלח…</small></span>",
                     unsafe_allow_html=True,
                 )
                 st.markdown(echo["content"])
@@ -528,15 +533,25 @@ def _render_chat(project_id: int):
     )
     st.session_state[echo_key] = pending
 
+    # Meta lines are explicit dir="rtl" HTML: sender names are often Latin, and
+    # a Latin-first line would flip LTR and drag its emoji to the left.
     for msg in messages:
         avatar = AVATARS.get(msg["sender"], DEFAULT_AVATAR)
         with st.chat_message(msg["sender"] or "unknown", avatar=avatar):
-            st.markdown(f"**{msg['sender']}** · `{fmt_ts(msg['created_at'])}`")
+            st.markdown(
+                f'<span dir="rtl"><strong>{html.escape(msg["sender"] or "")}</strong>'
+                f" · <code>{fmt_ts(msg['created_at'])}</code></span>",
+                unsafe_allow_html=True,
+            )
             st.markdown(msg["message"])
     for echo in pending:
         avatar = AVATARS.get(echo["sender"], DEFAULT_AVATAR)
         with st.chat_message(echo["sender"], avatar=avatar):
-            st.markdown(f"**{echo['sender']}** · 🕓 *נשלח…*")
+            st.markdown(
+                f'<span dir="rtl"><strong>{html.escape(echo["sender"])}</strong>'
+                " · 🕓 <em>נשלח…</em></span>",
+                unsafe_allow_html=True,
+            )
             st.markdown(echo["message"])
 
     prompt = st.chat_input("כתבו הודעה לצוות...", key=f"chat_input_{project_id}")
@@ -601,7 +616,7 @@ def render_welcome():
     user = st.session_state["user"]
 
     st.markdown(
-        f'<div class="welcome-greeting">ברוך הבא, {html.escape(user)} 👋</div>'
+        f'<div class="welcome-greeting">👋 ברוך הבא, {html.escape(user)}</div>'
         '<div class="welcome-sub">צוות AI וחדשנות · דשבורד ניהול משימות</div>',
         unsafe_allow_html=True,
     )
@@ -644,6 +659,33 @@ def render_welcome():
                         st.session_state["view"] = bubble["view"]
                         st.rerun()
 
+    _render_urgent_widget()
+
     st.caption(
         "כל שינוי מתועד עם השם והשעה ומסונכרן לענן — לחצו 🔄 רענון כדי לשלוף עדכונים מהצוות."
     )
+
+
+def _render_urgent_widget():
+    """Compact home-screen widget with every open urgent task across all projects."""
+    urgent_tasks = db.get_urgent_open_tasks()
+    if not urgent_tasks:
+        return
+
+    st.markdown(
+        f'<div class="welcome-section-title">🔥 משימות דחופות ({len(urgent_tasks)})</div>',
+        unsafe_allow_html=True,
+    )
+    with st.container(key="urgent_widget"):
+        for task in urgent_tasks:
+            source = task["project_name"] or (
+                "משימות דחופות" if task["task_type"] == "urgent" else "רעיונות לעתיד"
+            )
+            assignee = f" · 👤 {task['assignee']}" if task["assignee"] else ""
+            label = f"🔥 **{task['title']}**\n\n📂 {source}{assignee}"
+            if st.button(label, key=f"urgent_widget_{task['id']}", use_container_width=True):
+                if task["project_id"] is not None:
+                    st.session_state["view"] = ("project", task["project_id"])
+                else:
+                    st.session_state["view"] = task["task_type"]
+                st.rerun()

@@ -255,7 +255,7 @@ def clear_all_caches() -> None:
     """Clear every cached reader (used after a change that touches many tables)."""
     for cached in (
         get_users, get_users_detailed, get_contacts, get_projects, get_project,
-        get_spec, get_tasks, get_comments_map, get_chat,
+        get_spec, get_tasks, get_urgent_open_tasks, get_comments_map, get_chat,
     ):
         cached.clear()
 
@@ -401,7 +401,7 @@ def delete_project(project_id: int) -> None:
     get_projects.clear()
     get_project.clear()
     get_spec.clear()
-    get_tasks.clear()
+    _clear_task_caches()
     get_comments_map.clear()
     get_chat.clear()
 
@@ -461,6 +461,31 @@ def get_tasks(project_id: int | None = None, task_type: str = "project") -> list
         return cur.fetchall()
 
 
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_urgent_open_tasks() -> list[dict]:
+    """All open urgent tasks across every project, for the home-screen widget.
+
+    One query with the project name joined in; cached like the other task
+    reads and cleared by every task write.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.*, p.name AS project_name
+            FROM tasks t
+            LEFT JOIN projects p ON p.id = t.project_id
+            WHERE t.is_urgent AND NOT t.is_done
+            ORDER BY t.created_at DESC
+            """
+        )
+        return cur.fetchall()
+
+
+def _clear_task_caches() -> None:
+    get_tasks.clear()
+    get_urgent_open_tasks.clear()
+
+
 def add_task(
     title: str,
     assignee: str,
@@ -477,13 +502,13 @@ def add_task(
             """,
             (project_id, task_type, title, assignee, user, is_urgent),
         )
-    get_tasks.clear()
+    _clear_task_caches()
 
 
 def set_task_urgent(task_id: int, urgent: bool) -> None:
     with get_cursor() as cur:
         cur.execute("UPDATE tasks SET is_urgent = %s WHERE id = %s", (urgent, task_id))
-    get_tasks.clear()
+    _clear_task_caches()
 
 
 def set_task_done(task_id: int, done: bool, user: str) -> None:
@@ -500,13 +525,13 @@ def set_task_done(task_id: int, done: bool, user: str) -> None:
                 "WHERE id = %s",
                 (task_id,),
             )
-    get_tasks.clear()
+    _clear_task_caches()
 
 
 def delete_task(task_id: int) -> None:
     with get_cursor() as cur:
         cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
-    get_tasks.clear()
+    _clear_task_caches()
     get_comments_map.clear()
 
 
