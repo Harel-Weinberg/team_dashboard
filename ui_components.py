@@ -23,6 +23,7 @@ import streamlit as st
 
 import auth
 import database as db
+import notifications
 import optimistic
 
 LOCAL_TZ = ZoneInfo("Asia/Jerusalem")
@@ -202,16 +203,26 @@ def _render_spec(project_id: int):
 # ---------------------------------------------------------------------------
 
 
-def _toggle_task(task_id: int, widget_key: str):
-    """Optimistic toggle: remember the new status locally, sync in the background."""
+def _toggle_task(task_id: int, widget_key: str, task: dict):
+    """Optimistic toggle: remember the new status locally, sync in the background.
+
+    Trigger 2: on an open -> completed transition, notify the task's creator.
+    """
+    user = st.session_state["user"]
     new_value = bool(st.session_state[widget_key])
     future = optimistic.submit_write(
-        "סטטוס משימה", db.set_task_done, task_id, new_value, st.session_state["user"]
+        "סטטוס משימה", db.set_task_done, task_id, new_value, user
     )
     st.session_state.setdefault("task_done_override", {})[task_id] = {
         "value": new_value,
         "future": future,
     }
+
+    if new_value and not task["is_done"]:  # only on the open -> completed edge
+        toast = notifications.notify_task_completed(task["created_by"], task["title"], user)
+        if toast:
+            # Shown on the rerun that follows this callback (see main.py).
+            st.session_state["pending_toast"] = toast
 
 
 def _effective_done(task: dict) -> tuple[bool, bool]:
@@ -262,7 +273,7 @@ def _render_task(task: dict, comments: list[dict]):
             key=done_key,
             label_visibility="collapsed",
             on_change=_toggle_task,
-            args=(task["id"], done_key),
+            args=(task["id"], done_key, task),
             help="סימון המשימה כבוצעה",
         )
     with body_col:
@@ -382,6 +393,11 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
                         "is_urgent": is_urgent, "future": future,
                     }
                 )
+                # Trigger 1: a new urgent task notifies its assignee.
+                if is_urgent and assignee:
+                    st.session_state["pending_toast"] = notifications.notify_urgent_assignment(
+                        assignee, text
+                    )
                 st.rerun()
 
     # --- Task list -----------------------------------------------------------

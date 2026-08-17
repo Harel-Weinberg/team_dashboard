@@ -12,6 +12,7 @@ import streamlit as st
 
 import auth
 import database as db
+import notifications
 import optimistic
 from ui_components import fmt_ts
 
@@ -21,6 +22,9 @@ MAX_USERNAME_LEN = 32
 # Unicode word characters (Latin + Hebrew letters, digits, underscore) plus . -
 # No spaces: the username is typed by hand on the login screen.
 _USERNAME_RE = re.compile(rf"^[\w.\-]{{{MIN_USERNAME_LEN},{MAX_USERNAME_LEN}}}$", re.UNICODE)
+# Deliberately permissive: enough to catch typos, not a full RFC 5322 parser.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+_PHONE_RE = re.compile(r"^\+?[\d\-\s()]{7,20}$")
 
 
 def _flash(kind: str, message: str) -> None:
@@ -81,6 +85,8 @@ def render_user_management() -> None:
             {
                 "משתמש": u["username"],
                 "תפקיד": "🛡️ מנהל" if u["role"] == "admin" else "👤 משתמש",
+                "מייל": u.get("email") or "—",
+                "טלפון": u.get("phone") or "—",
                 "נוצר": fmt_ts(u["created_at"]),
             }
             for u in users
@@ -90,8 +96,11 @@ def render_user_management() -> None:
     )
 
     usernames = [u["username"] for u in users]
-    add_tab, rename_tab, password_tab, delete_tab = st.tabs(
-        ["➕ משתמש חדש", "✏️ שינוי שם משתמש", "🔑 שינוי סיסמה", "🗑️ מחיקת משתמש"]
+    add_tab, rename_tab, password_tab, contact_tab, delete_tab = st.tabs(
+        [
+            "➕ משתמש חדש", "✏️ שינוי שם משתמש", "🔑 שינוי סיסמה",
+            "📧 פרטי קשר", "🗑️ מחיקת משתמש",
+        ]
     )
 
     # --- Add user -------------------------------------------------------------
@@ -176,6 +185,40 @@ def render_user_management() -> None:
                 else:
                     db.set_user_password(target, auth.hash_password(password))
                     _flash("success", f"הסיסמה של '{target}' עודכנה.")
+                    st.rerun()
+
+    # --- Contact details (used by the notification system) -----------------------
+    with contact_tab:
+        st.caption(
+            "כתובת המייל משמשת לשליחת התראות: משימה דחופה שהוקצתה למשתמש, "
+            "וסיום משימה שהוא פתח. מספר הטלפון נשמר לשימוש עתידי בוואטסאפ."
+        )
+        if not notifications.is_configured():
+            st.info(
+                f"ערוץ השליחה ({notifications.channel()}) אינו מוגדר — ההתראות "
+                "נרשמות ליומן המערכת בלבד. הגדירו SMTP_* בקובץ הסודות כדי לשלוח בפועל."
+            )
+        with st.form("contact_form", clear_on_submit=False):
+            target = st.selectbox("משתמש", usernames, key="contact_target")
+            existing = next((u for u in users if u["username"] == target), {})
+            email = st.text_input(
+                "כתובת מייל", value=existing.get("email") or "", key="contact_email",
+                placeholder="name@example.com",
+            )
+            phone = st.text_input(
+                "טלפון (לוואטסאפ)", value=existing.get("phone") or "", key="contact_phone",
+                placeholder="+972501234567",
+            )
+            if st.form_submit_button("שמירת פרטי הקשר", type="primary"):
+                clean_email = email.strip()
+                clean_phone = phone.strip()
+                if clean_email and not _EMAIL_RE.fullmatch(clean_email):
+                    st.error("כתובת המייל אינה תקינה.")
+                elif clean_phone and not _PHONE_RE.fullmatch(clean_phone):
+                    st.error("מספר הטלפון אינו תקין (לדוגמה: +972501234567).")
+                else:
+                    db.set_user_contact(target, clean_email, clean_phone)
+                    _flash("success", f"פרטי הקשר של '{target}' עודכנו.")
                     st.rerun()
 
     # --- Delete user --------------------------------------------------------------

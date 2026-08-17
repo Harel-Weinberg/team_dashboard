@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS users (
     username       TEXT PRIMARY KEY,
     password_hash  TEXT,
     role           TEXT NOT NULL DEFAULT 'user',   -- 'admin' | 'user'
+    email          TEXT,                           -- notifications
+    phone          TEXT,                           -- notifications (WhatsApp)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -139,6 +141,8 @@ _MIGRATIONS = """
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_urgent BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
 
 -- Allow deleting a user without orphan-FK errors on projects they created,
 -- and let a username change cascade to the projects they created.
@@ -215,19 +219,42 @@ def get_user(username: str) -> dict | None:
 @st.cache_data(ttl=STABLE_TTL, show_spinner=False)
 def get_users_detailed() -> list[dict]:
     with get_cursor() as cur:
-        cur.execute("SELECT username, role, created_at FROM users ORDER BY created_at")
+        cur.execute(
+            "SELECT username, role, email, phone, created_at FROM users ORDER BY created_at"
+        )
         return cur.fetchall()
+
+
+@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
+def get_contacts() -> dict[str, dict]:
+    """username -> {'email': ..., 'phone': ...} for the notification system."""
+    with get_cursor() as cur:
+        cur.execute("SELECT username, email, phone FROM users")
+        return {
+            row["username"]: {"email": row["email"], "phone": row["phone"]}
+            for row in cur.fetchall()
+        }
+
+
+def set_user_contact(username: str, email: str | None, phone: str | None) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE users SET email = %s, phone = %s WHERE username = %s",
+            (email or None, phone or None, username),
+        )
+    _clear_user_caches()
 
 
 def _clear_user_caches() -> None:
     get_users.clear()
     get_users_detailed.clear()
+    get_contacts.clear()
 
 
 def clear_all_caches() -> None:
     """Clear every cached reader (used after a change that touches many tables)."""
     for cached in (
-        get_users, get_users_detailed, get_projects, get_project,
+        get_users, get_users_detailed, get_contacts, get_projects, get_project,
         get_spec, get_tasks, get_comments_map, get_chat,
     ):
         cached.clear()
@@ -272,8 +299,8 @@ def rename_user(old_username: str, new_username: str) -> int | None:
 
             cur.execute(
                 """
-                INSERT INTO users (username, password_hash, role, created_at)
-                SELECT %s, password_hash, role, created_at
+                INSERT INTO users (username, password_hash, role, email, phone, created_at)
+                SELECT %s, password_hash, role, email, phone, created_at
                 FROM users WHERE username = %s
                 """,
                 (new_username, old_username),

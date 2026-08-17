@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS users (
     username       TEXT PRIMARY KEY,
     password_hash  TEXT,
     role           TEXT NOT NULL DEFAULT 'user',   -- 'admin' | 'user'
+    email          TEXT,                           -- notifications
+    phone          TEXT,                           -- notifications (WhatsApp)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

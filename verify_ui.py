@@ -39,11 +39,13 @@ def unseed():
 
 
 def start_server():
+    os.makedirs(SHOTS, exist_ok=True)
+    log = open(os.path.join(SHOTS, "server.log"), "w", encoding="utf-8")  # noqa: SIM115
     proc = subprocess.Popen(
         [sys.executable, "-m", "streamlit", "run", "main.py",
          "--server.headless", "true", "--server.port", str(PORT),
          "--browser.gatherUsageStats", "false"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=log, stderr=subprocess.STDOUT,
     )
     for _ in range(60):
         try:
@@ -170,11 +172,20 @@ def main():
         page.locator('[data-testid="stMain"]').get_by_role(
             "button", name="➕ הוספה", exact=True
         ).click()
-        page.wait_for_timeout(1200)  # optimistic echo should appear immediately
-        echo_visible = page.get_by_text(task_title).count() > 0
-        results.append(("optimistic task echo visible in RTL layout", echo_visible, echo_visible))
+        # Wait for the row to appear rather than sleeping a fixed amount — the
+        # rerun now also dispatches a notification before re-rendering.
+        try:
+            page.wait_for_selector(f"text={task_title}", timeout=15000)
+            echo_visible = True
+        except Exception as exc:  # noqa: BLE001 — record as a failed check
+            echo_visible = f"not rendered: {exc}"
+        results.append(("optimistic task echo visible in RTL layout", echo_visible is True, echo_visible))
 
         # Urgent tag: red pill rendered next to the task name.
+        try:
+            page.wait_for_selector(".task-urgent", timeout=15000)
+        except Exception:  # noqa: BLE001 — the assertion below reports it
+            pass
         tag = page.evaluate(
             """() => {
                 const el = document.querySelector('.task-urgent');

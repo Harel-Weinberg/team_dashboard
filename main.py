@@ -9,6 +9,7 @@ import streamlit as st
 import admin_ui
 import auth
 import database as db
+import notifications
 import optimistic
 import theme
 import ui_components as ui
@@ -31,6 +32,10 @@ def main():
         st.error(f"אין חיבור למסד הנתונים — בדקו את .streamlit/secrets.toml.\n\n{exc}")
         st.stop()
 
+    # Publish notification settings to os.environ on the main thread, so the
+    # background sender threads only read environment variables.
+    notifications.bootstrap_from_secrets()
+
     # 2. Authentication gate.
     if not auth.require_login():
         st.stop()
@@ -38,8 +43,11 @@ def main():
     # 3. Global RTL (Hebrew) layout + component styling.
     theme.inject_app_css()
 
-    # 4. Surface any failed background (optimistic) writes from earlier actions.
+    # 4. Surface any failed background (optimistic) writes from earlier actions,
+    #    plus any toast queued by an action that triggered a rerun.
     optimistic.report_sync_failures()
+    if toast := st.session_state.pop("pending_toast", None):
+        st.toast(toast)
 
     # 4. Navigation + routing.
     view = ui.render_sidebar()
