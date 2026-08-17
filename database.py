@@ -2,10 +2,16 @@
 database.py — All data access for the Team Dashboard.
 
 Connects to a cloud PostgreSQL database (Supabase) using credentials from
-st.secrets. A fresh connection is opened per transaction and closed right
-after: Supabase's connection pooler (port 6543, transaction mode) does the
-actual pooling server-side, which keeps this safe when the app runs
-concurrently from multiple computers.
+st.secrets.
+
+Performance design:
+  * A ThreadedConnectionPool is created once per server process
+    (@st.cache_resource) and every query borrows a warm connection — no
+    TCP/TLS handshake per rerun. Thread-safe for concurrent sessions.
+  * Read queries are cached with @st.cache_data (short TTLs) and every write
+    explicitly clears the caches it invalidates, so a user always sees their
+    own change immediately; a teammate's changes appear within the TTL or on
+    the sidebar 🔄 Refresh (which clears all data caches).
 """
 
 import hashlib
@@ -14,16 +20,24 @@ from contextlib import contextmanager
 import psycopg2
 import psycopg2.errors
 import streamlit as st
+from psycopg2 import pool as pgpool
 from psycopg2.extras import RealDictCursor
+
+VOLATILE_TTL = 10  # seconds — specs, tasks, comments, chat (edited often)
+STABLE_TTL = 60    # seconds — project & user lists (edited rarely)
 
 # ---------------------------------------------------------------------------
 # Connection handling
 # ---------------------------------------------------------------------------
 
 
-def _connect():
+@st.cache_resource(show_spinner=False)
+def _get_pool() -> pgpool.ThreadedConnectionPool:
+    """One connection pool per server process, shared safely across sessions/threads."""
     cfg = st.secrets["database"]
-    return psycopg2.connect(
+    return pgpool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=10,
         host=cfg["host"],
         port=cfg["port"],
         dbname=cfg["dbname"],
@@ -31,19 +45,35 @@ def _connect():
         password=cfg["password"],
         sslmode="require",
         connect_timeout=10,
+        # Keep pooled connections alive so Supabase/network doesn't silently drop them.
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
     )
 
 
 @contextmanager
 def get_cursor():
-    """Yield a dict-cursor inside a transaction; commit on success, rollback on error."""
-    conn = _connect()
+    """Yield a dict-cursor inside a transaction on a pooled connection.
+
+    Commits on success, rolls back on error. Broken connections are closed and
+    discarded from the pool instead of being handed out again.
+    """
+    p = _get_pool()
+    conn = p.getconn()
     try:
+        if conn.closed:  # stale connection left in the pool — swap for a fresh one
+            p.putconn(conn, close=True)
+            conn = p.getconn()
         with conn:  # transaction scope: commit/rollback
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 yield cur
+    except psycopg2.OperationalError:
+        conn.close()  # connection died mid-query — make sure the pool discards it
+        raise
     finally:
-        conn.close()
+        p.putconn(conn, close=bool(conn.closed))
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +182,7 @@ def init_db() -> bool:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
 def get_users() -> list[str]:
     with get_cursor() as cur:
         cur.execute("SELECT username FROM users ORDER BY username")
@@ -164,10 +195,16 @@ def get_user(username: str) -> dict | None:
         return cur.fetchone()
 
 
+@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
 def get_users_detailed() -> list[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT username, role, created_at FROM users ORDER BY created_at")
         return cur.fetchall()
+
+
+def _clear_user_caches() -> None:
+    get_users.clear()
+    get_users_detailed.clear()
 
 
 def add_user(username: str, password_hash: str, role: str = "user") -> bool:
@@ -178,6 +215,7 @@ def add_user(username: str, password_hash: str, role: str = "user") -> bool:
                 "INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s)",
                 (username, password_hash, role),
             )
+        _clear_user_caches()
         return True
     except psycopg2.errors.UniqueViolation:
         return False
@@ -194,6 +232,7 @@ def set_user_password(username: str, password_hash: str) -> None:
 def delete_user(username: str) -> None:
     with get_cursor() as cur:
         cur.execute("DELETE FROM users WHERE username = %s", (username,))
+    _clear_user_caches()
 
 
 def count_admins() -> int:
@@ -207,12 +246,14 @@ def count_admins() -> int:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
 def get_projects() -> list[dict]:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM projects ORDER BY created_at")
         return cur.fetchall()
 
 
+@st.cache_data(ttl=STABLE_TTL, show_spinner=False)
 def get_project(project_id: int) -> dict | None:
     with get_cursor() as cur:
         cur.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
@@ -232,7 +273,8 @@ def add_project(name: str, user: str) -> int | None:
                 "INSERT INTO specs (project_id) VALUES (%s) ON CONFLICT DO NOTHING",
                 (project_id,),
             )
-            return project_id
+        get_projects.clear()
+        return project_id
     except psycopg2.errors.UniqueViolation:
         return None
 
@@ -242,6 +284,7 @@ def add_project(name: str, user: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_spec(project_id: int) -> dict:
     with get_cursor() as cur:
         cur.execute(
@@ -265,6 +308,7 @@ def save_spec(project_id: int, content: str, user: str) -> None:
             """,
             (project_id, content, user),
         )
+    get_spec.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +316,7 @@ def save_spec(project_id: int, content: str, user: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_tasks(project_id: int | None = None, task_type: str = "project") -> list[dict]:
     with get_cursor() as cur:
         if project_id is not None:
@@ -303,6 +348,7 @@ def add_task(
             """,
             (project_id, task_type, title, assignee, user),
         )
+    get_tasks.clear()
 
 
 def set_task_done(task_id: int, done: bool, user: str) -> None:
@@ -319,11 +365,14 @@ def set_task_done(task_id: int, done: bool, user: str) -> None:
                 "WHERE id = %s",
                 (task_id,),
             )
+    get_tasks.clear()
 
 
 def delete_task(task_id: int) -> None:
     with get_cursor() as cur:
         cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+    get_tasks.clear()
+    get_comments_map.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -331,13 +380,28 @@ def delete_task(task_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_comments(task_id: int) -> list[dict]:
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_comments_map(
+    project_id: int | None = None, task_type: str = "project"
+) -> dict[int, list[dict]]:
+    """All comments for every task in scope, in ONE query (instead of one per task)."""
     with get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM task_comments WHERE task_id = %s ORDER BY created_at",
-            (task_id,),
-        )
-        return cur.fetchall()
+        if project_id is not None:
+            cur.execute(
+                "SELECT c.* FROM task_comments c JOIN tasks t ON t.id = c.task_id "
+                "WHERE t.project_id = %s ORDER BY c.created_at",
+                (project_id,),
+            )
+        else:
+            cur.execute(
+                "SELECT c.* FROM task_comments c JOIN tasks t ON t.id = c.task_id "
+                "WHERE t.task_type = %s AND t.project_id IS NULL ORDER BY c.created_at",
+                (task_type,),
+            )
+        comments_map: dict[int, list[dict]] = {}
+        for row in cur.fetchall():
+            comments_map.setdefault(row["task_id"], []).append(row)
+        return comments_map
 
 
 def add_comment(task_id: int, content: str, user: str) -> None:
@@ -346,6 +410,7 @@ def add_comment(task_id: int, content: str, user: str) -> None:
             "INSERT INTO task_comments (task_id, author, content) VALUES (%s, %s, %s)",
             (task_id, user, content),
         )
+    get_comments_map.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +418,7 @@ def add_comment(task_id: int, content: str, user: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_chat(project_id: int) -> list[dict]:
     with get_cursor() as cur:
         cur.execute(
@@ -368,3 +434,4 @@ def add_chat_message(project_id: int, message: str, user: str) -> None:
             "INSERT INTO project_chat (project_id, sender, message) VALUES (%s, %s, %s)",
             (project_id, user, message),
         )
+    get_chat.clear()

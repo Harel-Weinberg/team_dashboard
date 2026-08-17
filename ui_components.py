@@ -43,6 +43,7 @@ def render_sidebar():
 
         top_left, top_right = st.columns(2)
         if top_left.button("🔄 Refresh", use_container_width=True):
+            st.cache_data.clear()  # force-pull teammates' latest changes
             st.rerun()
         if top_right.button("🚪 Log out", use_container_width=True):
             auth.logout()
@@ -139,7 +140,7 @@ def _toggle_task(task_id: int, widget_key: str):
     db.set_task_done(task_id, st.session_state[widget_key], st.session_state["user"])
 
 
-def _render_task(task: dict):
+def _render_task(task: dict, comments: list[dict]):
     user = st.session_state["user"]
     done_key = f"task_done_{task['id']}"
 
@@ -167,7 +168,6 @@ def _render_task(task: dict):
             meta += f" · ✅ Completed by {task['completed_by']} at {fmt_ts(task['completed_at'])}"
         st.caption(meta)
 
-        comments = db.get_comments(task["id"])
         with st.expander(f"💬 Notes ({len(comments)})"):
             for comment in comments:
                 avatar = AVATARS.get(comment["author"], DEFAULT_AVATAR)
@@ -221,8 +221,9 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
 
     open_tasks = [t for t in tasks if not t["is_done"]]
     st.caption(f"{len(open_tasks)} open / {len(tasks)} total")
+    comments_map = db.get_comments_map(project_id=project_id, task_type=task_type)
     for task in tasks:
-        _render_task(task)
+        _render_task(task, comments_map.get(task["id"], []))
 
 
 # ---------------------------------------------------------------------------
