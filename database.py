@@ -687,11 +687,25 @@ def save_spec(project_id: int, content: str, user: str) -> None:
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def _board_tasks(task_type: str) -> list[dict]:
-    """Tasks of the global boards (urgent / backlog) — not tied to a project."""
+    """Tasks of the global boards (urgent / backlog) — not tied to a project.
+
+    Explicit column list, NOT `SELECT *` — same reason as
+    get_urgent_open_tasks(): this is @st.cache_data-cached, which pickles the
+    return value, and attachment_data (bytea) comes back as an unpicklable
+    memoryview. No ad-hoc task currently has an attachment, but the add-task
+    form allows uploading one for any task_type, so this was one upload away
+    from crashing these two pages the same way.
+    """
     with get_cursor() as cur:
         cur.execute(
-            "SELECT * FROM tasks WHERE task_type = %s AND project_id IS NULL "
-            "ORDER BY is_done, is_urgent DESC, created_at DESC",
+            """
+            SELECT id, project_id, task_type, title, assignee, is_done,
+                   created_by, created_at, completed_by, completed_at,
+                   is_urgent, status, due_date, description, tags,
+                   attachment_name, attachment_type, urgency
+            FROM tasks WHERE task_type = %s AND project_id IS NULL
+            ORDER BY is_done, is_urgent DESC, created_at DESC
+            """,
             (task_type,),
         )
         return cur.fetchall()
@@ -733,11 +747,23 @@ def get_urgent_open_tasks() -> list[dict]:
 
     One query with the project name joined in; cached like the other task
     reads and cleared by every task write.
+
+    Explicit column list, NOT `t.*`: this result is cached with
+    @st.cache_data, which pickles the return value, and psycopg2 returns
+    attachment_data (bytea) as a memoryview — unpicklable, so `t.*` here
+    crashes the whole home page the moment any urgent+open task anywhere
+    has an attachment (confirmed live: a real production task did). The
+    widget never needs the attachment bytes anyway — it only checks
+    attachment_name to decide whether to show anything about it at all.
     """
     with get_cursor() as cur:
         cur.execute(
             """
-            SELECT t.*, p.name AS project_name
+            SELECT t.id, t.project_id, t.task_type, t.title, t.assignee, t.is_done,
+                   t.created_by, t.created_at, t.completed_by, t.completed_at,
+                   t.is_urgent, t.status, t.due_date, t.description, t.tags,
+                   t.attachment_name, t.attachment_type, t.urgency,
+                   p.name AS project_name
             FROM tasks t
             LEFT JOIN projects p ON p.id = t.project_id
             WHERE t.is_urgent AND NOT t.is_done

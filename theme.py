@@ -401,6 +401,23 @@ a.task-mail:hover {
     white-space: nowrap;
     box-shadow: 0 2px 8px rgba(0, 122, 255, 0.35);
 }
+/* st.tabs labels don't accept unsafe_allow_html — only a small markdown
+   subset (bold/italic/code/links/images) — so the chat tab's unread count
+   can't use the .unread-badge span directly; it's emitted as **בold** text
+   instead (see render_project_dashboard). Streamlit renders that as a plain
+   <strong>, with none of the pill styling above. Target the rendered
+   <strong> directly so it still gets the same blue-badge treatment instead
+   of just looking like slightly heavier text. */
+[data-testid="stTabs"] [data-baseweb="tab"] strong {
+    display: inline-block;
+    background: #007AFF;
+    color: #ffffff !important;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    font-size: 0.7rem;
+    margin-inline-start: 0.3rem;
+    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.35);
+}
 
 /* List-view header row above the task cards. Same column widths as the
    cards themselves (see ui_components.TASK_ROW_COLUMNS), styled as quiet

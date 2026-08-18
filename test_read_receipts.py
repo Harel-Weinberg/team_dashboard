@@ -53,6 +53,41 @@ def _open_project(pid):
     return at
 
 
+def test_urgent_and_board_queries_survive_an_attachment(pid):
+    """Regression for a real crash: get_urgent_open_tasks() and _board_tasks()
+    used to SELECT t.* — @st.cache_data pickles the return value, and
+    psycopg2 returns bytea (attachment_data) as an unpicklable memoryview.
+    A live production task with a real PDF attachment was hitting this on
+    every home-screen load. Fixed by listing columns explicitly, excluding
+    attachment_data (nothing here needs the bytes — only attachment_name, to
+    decide whether to show anything about it at all).
+    """
+    db.add_task(
+        "urgent task with a file", TEMP_ADMIN, TEMP_ADMIN, pid, "project",
+        is_urgent=True, attachment=("doc.pdf", "application/pdf", b"%PDF-1.4 x"),
+    )
+    db.add_task(
+        "adhoc task with a file", TEMP_ADMIN, TEMP_ADMIN, None, "urgent",
+        attachment=("doc2.pdf", "application/pdf", b"%PDF-1.4 y"),
+    )
+    db.get_urgent_open_tasks.clear()
+    db._board_tasks.clear()
+
+    urgent = db.get_urgent_open_tasks()  # used to raise UnserializableReturnValueError
+    assert any(t["title"] == "urgent task with a file" for t in urgent)
+    assert all("attachment_data" not in t for t in urgent)
+    print("PASS: get_urgent_open_tasks() no longer crashes on a task with an attachment")
+
+    board = db._board_tasks("urgent")
+    assert any(t["title"] == "adhoc task with a file" for t in board)
+    assert all("attachment_data" not in t for t in board)
+    print("PASS: _board_tasks() no longer crashes on a task with an attachment")
+
+    db.delete_task(
+        next(t["id"] for t in db._board_tasks("urgent") if t["title"] == "adhoc task with a file")
+    )
+
+
 def test_db_layer_counts_and_mark_read(pid):
     db.add_user(OTHER_USER, "x", "user")
     db.add_chat_message(pid, "unread 1", OTHER_USER)
@@ -215,6 +250,7 @@ if __name__ == "__main__":
     _cleanup()
     pid = db.add_project(TEMP_PROJECT, TEMP_ADMIN)
     try:
+        test_urgent_and_board_queries_survive_an_attachment(pid)
         task = test_db_layer_counts_and_mark_read(pid)
         test_chat_tab_badge_appears_and_clears(pid)
         test_task_comment_badge_appears_and_clears(pid, task)
