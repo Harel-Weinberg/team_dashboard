@@ -44,7 +44,7 @@ def _document_index(at, predicate):
     return next(i for i, n in enumerate(order) if predicate(n))
 
 
-def test_scroll_container_is_fixed_height_and_no_autoscroll(pid):
+def test_scroll_container_is_fixed_height_and_autoscrolls(pid):
     """Requirement 1: the page must stop growing with the conversation."""
     at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
     at.session_state["view"] = ("project", pid)
@@ -55,11 +55,12 @@ def test_scroll_container_is_fixed_height_and_no_autoscroll(pid):
     assert scroll.type == "flex_container"
     assert scroll.proto.height_config.pixel_height == 500, "expected a fixed-height panel"
     assert scroll.proto.flex_container.border is False, "border=False was requested explicitly"
-    # Newest-at-top means there is never anything "below" to auto-scroll to;
-    # autoscroll defaulting on (as it would with st.chat_message present)
-    # would fight that.
-    assert scroll.proto.autoscroll is False
-    print("PASS: chat renders in a fixed 500px, borderless, non-autoscrolling panel")
+    # Oldest-at-top/newest-at-bottom (standard chat-app order) means the
+    # newest message is always the LAST thing added — autoscroll=True is
+    # what keeps the view anchored there instead of wherever it happened to
+    # be scrolled before.
+    assert scroll.proto.autoscroll is True
+    print("PASS: chat renders in a fixed 500px, borderless, autoscrolling panel")
 
 
 def test_chat_input_renders_below_the_scroll_panel(pid):
@@ -76,8 +77,9 @@ def test_chat_input_renders_below_the_scroll_panel(pid):
     print("PASS: chat_input is positioned after the scroll panel in document order")
 
 
-def test_newest_message_renders_first(pid):
-    """Requirement 3: newest at the very top, not the bottom."""
+def test_oldest_message_renders_first(pid):
+    """Requirement 1: standard chat-app order — oldest at the top, newest at
+    the bottom, matching WhatsApp/iMessage."""
     older = f"older-{pid}"
     newer = f"newer-{pid}"
     db.add_chat_message(pid, older, TEMP_ADMIN)
@@ -90,11 +92,40 @@ def test_newest_message_renders_first(pid):
     at = at.run()
 
     batch = next(m.value for m in at.markdown if '<div class="chat-row' in (m.value or ""))
-    assert batch.index(newer) < batch.index(older), (
-        "the newer message must appear BEFORE the older one in the rendered HTML "
+    assert batch.index(older) < batch.index(newer), (
+        "the older message must appear BEFORE the newer one in the rendered HTML "
         "(top of the panel), not after"
     )
-    print("PASS: the newest message renders above the older one")
+    print("PASS: the oldest message renders above the newer one")
+
+
+def test_pending_send_appends_after_landed_messages(pid):
+    """Requirement 3: the optimistic echo appears at the BOTTOM, below every
+    already-landed message — not above them the way the previous (newest-at-
+    top) design rendered it."""
+    landed_text = f"already-landed-{pid}"
+    db.add_chat_message(pid, landed_text, TEMP_ADMIN)
+    db.get_chat.clear()
+    db.get_chat_watermark.clear()
+
+    at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+    at.session_state["view"] = ("project", pid)
+    at = at.run()
+
+    pending_text = f"still-sending-{pid}"
+    at = at.chat_input(key=f"chat_input_{pid}").set_value(pending_text).run()
+    assert not at.exception, at.exception[0] if at.exception else None
+
+    landed_index = _document_index(
+        at, lambda n: n.type == "markdown" and landed_text in (n.proto.body or "")
+    )
+    pending_index = _document_index(
+        at, lambda n: n.type == "markdown" and pending_text in (n.proto.body or "")
+    )
+    assert landed_index < pending_index, (
+        "the pending echo must render AFTER (below) the already-landed message"
+    )
+    print("PASS: the optimistic 'sending...' echo appends at the bottom, below landed messages")
 
 
 def test_bubble_side_matches_sender_not_viewer_identity(pid):
@@ -152,9 +183,10 @@ if __name__ == "__main__":
     _cleanup()
     pid = db.add_project(TEMP_PROJECT, TEMP_ADMIN)
     try:
-        test_scroll_container_is_fixed_height_and_no_autoscroll(pid)
+        test_scroll_container_is_fixed_height_and_autoscrolls(pid)
         test_chat_input_renders_below_the_scroll_panel(pid)
-        test_newest_message_renders_first(pid)
+        test_oldest_message_renders_first(pid)
+        test_pending_send_appends_after_landed_messages(pid)
         test_bubble_side_matches_sender_not_viewer_identity(pid)
         test_message_text_is_html_escaped()
         test_bubble_uses_rtl_for_content_and_ltr_for_layout()

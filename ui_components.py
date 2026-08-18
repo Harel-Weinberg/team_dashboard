@@ -716,22 +716,36 @@ def _chat_fragment(project_id: int):
     st.session_state["pending_msgs"][project_id] = pending
 
     # Fixed-height, independently scrolling panel — the page itself no longer
-    # grows with the conversation. autoscroll=False is explicit (it would
-    # default to off anyway once st.chat_message is gone) because it matters
-    # here for a different reason: newest-at-top means there is never
-    # anything "below" to scroll to, so auto-scroll-to-bottom would be wrong.
+    # grows with the conversation. autoscroll=True keeps it anchored to the
+    # newest message (both on first open and as new ones arrive), matching
+    # standard chat apps: oldest at the top, newest at the bottom.
     with st.container(
-        height=CHAT_SCROLL_HEIGHT, border=False, autoscroll=False,
+        height=CHAT_SCROLL_HEIGHT, border=False, autoscroll=True,
         key=f"chat_scroll_{project_id}",
     ):
         if not messages and not pending:
             st.caption("אין הודעות עדיין — כתבו את הראשונה למטה 👇")
 
-        # Newest at the very top: pending sends are always more recent than
-        # any landed row (so they render first, newest-pending-first), then
-        # every landed message newest-first. Both lists are stored
-        # oldest-appended-first, hence reversed() on each.
-        for entry in reversed(pending):
+        if messages:
+            # Landed messages have no interactivity, so they're batched into
+            # one markdown call instead of one st element per row — cheaper
+            # for the frontend to diff on every 500ms poll tick. Oldest first,
+            # so the newest lands at the bottom.
+            st.markdown(
+                "".join(
+                    _chat_bubble_html(
+                        m["sender"], fmt_ts(m["created_at"]), m["message"],
+                        is_mine=m["sender"] == user,
+                    )
+                    for m in messages
+                ),
+                unsafe_allow_html=True,
+            )
+
+        # Pending sends are always more recent than any landed row, so they
+        # render last (at the bottom, below every real message) — oldest
+        # pending first, same as the real-message ordering above.
+        for entry in pending:
             future = entry.get("future")
             failed = future is not None and future.done() and future.exception() is not None
             # Keyed containers get an st-key-* class in the DOM; theme.py
@@ -759,21 +773,6 @@ def _chat_fragment(project_id: int):
                         entry["confirmed"] = False
                         _dispatch_chat_write(project_id, entry)
                         _rerun_scoped()
-
-        if messages:
-            # Landed messages have no interactivity, so they're batched into
-            # one markdown call instead of one st element per row — cheaper
-            # for the frontend to diff on every 500ms poll tick.
-            st.markdown(
-                "".join(
-                    _chat_bubble_html(
-                        m["sender"], fmt_ts(m["created_at"]), m["message"],
-                        is_mine=m["sender"] == user,
-                    )
-                    for m in reversed(messages)
-                ),
-                unsafe_allow_html=True,
-            )
 
     _on_chat_viewed(project_id, messages)
 
