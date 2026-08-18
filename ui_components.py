@@ -604,12 +604,30 @@ def _dispatch_chat_write(project_id: int, entry: dict) -> None:
     )
 
 
-def _chat_meta_html(sender: str, when: str) -> str:
-    # Explicit dir="rtl": sender names are often Latin, and a Latin-first line
-    # would flip the whole meta line LTR and drag its separator to the left.
+CHAT_SCROLL_HEIGHT = 500
+
+
+def _chat_bubble_html(sender: str, when: str, body: str, *, is_mine: bool) -> str:
+    """One message as a self-contained, iMessage-style HTML bubble.
+
+    Layout direction (which side the bubble sits on) and text direction
+    (how the Hebrew inside it reads) are two different concerns that must be
+    set separately: the row is forced to `direction: ltr` so `flex-start`
+    always means the literal left edge of the screen regardless of the app's
+    RTL context — inheriting the ambient `direction: rtl` here would flip
+    "mine"/"theirs" to the wrong sides. The bubble's own content is then set
+    back to `direction: rtl` so Hebrew still reads correctly inside it.
+    """
+    side = "mine" if is_mine else "theirs"
+    avatar = AVATARS.get(sender, DEFAULT_AVATAR)
+    safe_body = html.escape(body)
+    safe_sender = html.escape(sender or "")
     return (
-        f'<span dir="rtl"><strong>{html.escape(sender or "")}</strong>'
-        f" · <code>{when}</code></span>"
+        f'<div class="chat-row {side}">'
+        f'<div class="chat-bubble {side}">'
+        f'<div class="chat-bubble-body">{safe_body}</div>'
+        f'<div class="chat-bubble-meta">{avatar} {safe_sender} · {when}</div>'
+        "</div></div>"
     )
 
 
@@ -697,32 +715,43 @@ def _chat_fragment(project_id: int):
     pending = [e for e in pending if e["client_msg_id"] not in landed]
     st.session_state["pending_msgs"][project_id] = pending
 
-    for msg in messages:
-        with st.chat_message(msg["sender"] or "unknown",
-                             avatar=AVATARS.get(msg["sender"], DEFAULT_AVATAR)):
-            st.markdown(_chat_meta_html(msg["sender"], fmt_ts(msg["created_at"])),
-                        unsafe_allow_html=True)
-            st.markdown(msg["message"])
+    # Fixed-height, independently scrolling panel — the page itself no longer
+    # grows with the conversation. autoscroll=False is explicit (it would
+    # default to off anyway once st.chat_message is gone) because it matters
+    # here for a different reason: newest-at-top means there is never
+    # anything "below" to scroll to, so auto-scroll-to-bottom would be wrong.
+    with st.container(
+        height=CHAT_SCROLL_HEIGHT, border=False, autoscroll=False,
+        key=f"chat_scroll_{project_id}",
+    ):
+        if not messages and not pending:
+            st.caption("אין הודעות עדיין — כתבו את הראשונה למטה 👇")
 
-    for entry in pending:
-        future = entry.get("future")
-        failed = future is not None and future.done() and future.exception() is not None
-        # Keyed containers get an st-key-* class in the DOM; theme.py mutes
-        # only the still-in-flight ones. Confirmed and failed entries render
-        # at full opacity — a failure needs attention, and a confirmed send
-        # is (transiently) as good as landed.
-        if failed:
-            key_prefix = "chatfail"
-        elif entry.get("confirmed"):
-            key_prefix = "chatconfirmed"
-        else:
-            key_prefix = "chatpend"
-        with st.container(key=f"{key_prefix}_{entry['client_msg_id']}"):
-            with st.chat_message(entry["sender"],
-                                 avatar=AVATARS.get(entry["sender"], DEFAULT_AVATAR)):
-                st.markdown(_chat_meta_html(entry["sender"], fmt_ts(entry["created_at"])),
-                            unsafe_allow_html=True)
-                st.markdown(entry["body"])
+        # Newest at the very top: pending sends are always more recent than
+        # any landed row (so they render first, newest-pending-first), then
+        # every landed message newest-first. Both lists are stored
+        # oldest-appended-first, hence reversed() on each.
+        for entry in reversed(pending):
+            future = entry.get("future")
+            failed = future is not None and future.done() and future.exception() is not None
+            # Keyed containers get an st-key-* class in the DOM; theme.py
+            # mutes only the still-in-flight ones. Confirmed and failed
+            # entries render at full opacity — a failure needs attention, and
+            # a confirmed send is (transiently) as good as landed.
+            if failed:
+                key_prefix = "chatfail"
+            elif entry.get("confirmed"):
+                key_prefix = "chatconfirmed"
+            else:
+                key_prefix = "chatpend"
+            with st.container(key=f"{key_prefix}_{entry['client_msg_id']}"):
+                st.markdown(
+                    _chat_bubble_html(
+                        entry["sender"], fmt_ts(entry["created_at"]), entry["body"],
+                        is_mine=entry["sender"] == user,
+                    ),
+                    unsafe_allow_html=True,
+                )
                 if failed:
                     # Never silently drop a message the user watched appear.
                     st.caption(f"⚠️ ההודעה לא נשלחה — {future.exception()}")
@@ -730,6 +759,21 @@ def _chat_fragment(project_id: int):
                         entry["confirmed"] = False
                         _dispatch_chat_write(project_id, entry)
                         _rerun_scoped()
+
+        if messages:
+            # Landed messages have no interactivity, so they're batched into
+            # one markdown call instead of one st element per row — cheaper
+            # for the frontend to diff on every 500ms poll tick.
+            st.markdown(
+                "".join(
+                    _chat_bubble_html(
+                        m["sender"], fmt_ts(m["created_at"]), m["message"],
+                        is_mine=m["sender"] == user,
+                    )
+                    for m in reversed(messages)
+                ),
+                unsafe_allow_html=True,
+            )
 
     _on_chat_viewed(project_id, messages)
 

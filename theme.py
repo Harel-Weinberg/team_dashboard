@@ -107,11 +107,10 @@ html, body, .stApp,
     unicode-bidi: plaintext;
 }
 
-/* Markdown, captions, alerts and chat bodies. */
+/* Markdown, captions and alerts. */
 [data-testid="stMarkdownContainer"],
 [data-testid="stCaptionContainer"],
-[data-testid="stAlert"],
-[data-testid="stChatMessageContent"] {
+[data-testid="stAlert"] {
     direction: rtl;
     text-align: right;
 }
@@ -119,11 +118,6 @@ html, body, .stApp,
 /* Tab bar starts from the right. */
 [data-testid="stTabs"] [data-baseweb="tab-list"] {
     direction: rtl;
-}
-
-/* Chat rows: `direction: rtl` already puts the avatar on the right. */
-[data-testid="stChatMessage"] {
-    text-align: right;
 }
 
 /* Content that must stay left-to-right to stay readable. */
@@ -221,6 +215,64 @@ code, pre, [data-testid="stDataFrame"] {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 
+/* Project chat: fixed-height scroll panel + iMessage-style bubbles.
+   See ui_components._chat_bubble_html() — the row is forced to
+   `direction: ltr` there so flex-start/flex-end are the LITERAL left/right
+   edge of the screen, independent of the app's ambient RTL; the bubble
+   itself is set back to `direction: rtl` so Hebrew still reads correctly. */
+[class*="st-key-chat_scroll_"] {
+    background: rgba(255, 255, 255, 0.55);
+    border-radius: 20px;
+    padding: 0.75rem 1rem 0.25rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(10px);
+}
+.chat-row {
+    display: flex;
+    direction: ltr;
+    margin: 0 0 0.5rem;
+}
+.chat-row.mine { justify-content: flex-start; }
+.chat-row.theirs { justify-content: flex-end; }
+.chat-bubble {
+    max-width: 74%;
+    padding: 0.55rem 0.9rem;
+    border-radius: 18px;
+    direction: rtl;
+    text-align: right;
+    unicode-bidi: isolate;
+}
+.chat-bubble-body {
+    font-size: 0.95rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.chat-bubble-meta {
+    font-size: 0.7rem;
+    margin-top: 0.25rem;
+    opacity: 0.8;
+    unicode-bidi: plaintext;
+}
+/* Mine: solid Apple-blue bubble, white text — the app's one existing accent
+   color (see the primary-button rule above), so chat matches the rest of
+   the UI's palette instead of introducing a second brand color. */
+.chat-bubble.mine {
+    background: #0a84ff;
+    color: #ffffff;
+    box-shadow: 0 4px 14px rgba(10, 132, 255, 0.28);
+}
+.chat-bubble.mine .chat-bubble-meta { color: rgba(255, 255, 255, 0.85); }
+/* Theirs: clean glass-white card with a soft shadow, matching every other
+   card surface in the app. */
+.chat-bubble.theirs {
+    background: rgba(255, 255, 255, 0.9);
+    color: #23213a;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(6px);
+}
+.chat-bubble.theirs .chat-bubble-meta { color: #6b7280; }
+
 /* Tabs: iOS-style segmented control (pill track, white selected pill). */
 [data-testid="stTabs"] [data-baseweb="tab-list"] {
     background: rgba(35, 33, 58, 0.06);
@@ -258,15 +310,6 @@ code, pre, [data-testid="stDataFrame"] {
     background: transparent;
     box-shadow: none;
     padding: 0;
-}
-
-/* Chat: white message cards. */
-[data-testid="stChatMessage"] {
-    background: #ffffff;
-    border-radius: 20px;
-    padding: 0.9rem 1.1rem;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-    margin-bottom: 0.55rem;
 }
 
 /* Tables. */
