@@ -142,6 +142,18 @@ CREATE TABLE IF NOT EXISTS project_chat (
     message     TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Per-user chat read state, for the unread badges on the home screen.
+-- project_id carries the same ON DELETE CASCADE as every other child table so
+-- deleting a project cannot leave orphan read markers behind. username is a
+-- plain column on purpose: rename_user() deliberately re-attributes identity
+-- columns explicitly rather than leaning on ON UPDATE CASCADE.
+CREATE TABLE IF NOT EXISTS chat_reads (
+    username      TEXT NOT NULL,
+    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    last_read_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (username, project_id)
+);
 """
 
 
@@ -173,6 +185,12 @@ UPDATE tasks SET status = CASE WHEN is_done THEN 'done' ELSE 'todo' END
  WHERE status IS NULL;
 ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'todo';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date DATE;
+
+-- Optimistic-send reconciliation: the client mints a uuid4 per message so a
+-- local echo can be matched to its server row exactly, instead of comparing
+-- sender+body text. The partial unique index below also makes the INSERT
+-- idempotent, so a retried write cannot double-post.
+ALTER TABLE project_chat ADD COLUMN IF NOT EXISTS client_msg_id TEXT;
 """
 
 
@@ -184,6 +202,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_project_time
 CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
 CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
+    ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads (username);
 """
 
 # Every column that stores a username as identity-tagging metadata. Renaming a

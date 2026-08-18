@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS project_chat (
 );
 
 -- --------------------------------------------------------------------------
+-- Per-user chat read state (unread badges on the home screen)
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS chat_reads (
+    username      TEXT NOT NULL,
+    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    last_read_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (username, project_id)
+);
+
+-- Optimistic-send reconciliation id (additive).
+ALTER TABLE project_chat ADD COLUMN IF NOT EXISTS client_msg_id TEXT;
+
+-- --------------------------------------------------------------------------
 -- Forward-compatibility columns for the planned kanban board (additive only —
 -- is_done remains the source of truth; no code reads these yet).
 -- --------------------------------------------------------------------------
@@ -75,6 +88,9 @@ CREATE INDEX IF NOT EXISTS idx_chat_project_time
 CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
 CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
+    ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads (username);
 
 -- Default admin seeding (dummy passwords 'harel2026' / 'yitzhak2026') is done
 -- automatically by the app's init_db() when the users table is empty.
