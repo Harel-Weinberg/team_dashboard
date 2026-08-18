@@ -58,13 +58,16 @@ CREATE TABLE IF NOT EXISTS project_chat (
 );
 
 -- --------------------------------------------------------------------------
--- Per-user chat read state (unread badges on the home screen)
+-- Per-user read state, generic across project chat and task comment threads
+-- (unread badges). No FK on scope_id since it points at different tables
+-- depending on scope_type; cleanup on delete is explicit in application code.
 -- --------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS chat_reads (
+CREATE TABLE IF NOT EXISTS read_receipts (
     username      TEXT NOT NULL,
-    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    scope_type    TEXT NOT NULL,
+    scope_id      INTEGER NOT NULL,
     last_read_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (username, project_id)
+    PRIMARY KEY (username, scope_type, scope_id)
 );
 
 -- Optimistic-send reconciliation id (additive).
@@ -98,6 +101,24 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_type TEXT;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_data BYTEA;
 
 -- --------------------------------------------------------------------------
+-- Urgency becomes a 3-level field (נמוך / בינוני / גבוה) instead of a
+-- boolean. is_urgent stays in sync (is_urgent = urgency = 'גבוה') for the
+-- same reason status kept is_done in sync — get_urgent_open_tasks(), the
+-- home-screen urgent widget and notify_urgent_assignment() are all keyed
+-- on is_urgent and already tested. "Not flagged urgent" maps to the
+-- neutral middle level, since that was every task's implicit default
+-- before this column existed.
+-- --------------------------------------------------------------------------
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS urgency TEXT;
+UPDATE tasks SET urgency = CASE WHEN is_urgent THEN 'גבוה' ELSE 'בינוני' END
+ WHERE urgency IS NULL;
+ALTER TABLE tasks ALTER COLUMN urgency SET DEFAULT 'בינוני';
+
+-- chat_reads (project-chat-only, never wired into any application code) is
+-- superseded by read_receipts above, which also covers task comments.
+DROP TABLE IF EXISTS chat_reads;
+
+-- --------------------------------------------------------------------------
 -- Indexes
 -- --------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_chat_project_time
@@ -108,7 +129,8 @@ CREATE INDEX IF NOT EXISTS idx_task_status   ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
     ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads (username);
+CREATE INDEX IF NOT EXISTS idx_read_receipts_scope
+    ON read_receipts (scope_type, scope_id);
 
 -- Default admin seeding (dummy passwords 'harel2026' / 'yitzhak2026') is done
 -- automatically by the app's init_db() when the users table is empty.

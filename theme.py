@@ -347,64 +347,87 @@ a.task-mail:hover {
 
 /* --- Task row controls ---------------------------------------------------- */
 
-/* Urgency toggle — active state: red pill. */
-[class*="st-key-task_urgent_on_"] button {
-    background: #fdecec !important;
-    color: #c0202f !important;
-    border: 1px solid rgba(192, 32, 47, 0.22) !important;
-    border-radius: 999px !important;
-    padding: 0.12rem 0.55rem;
-    min-height: 0;
-    font-size: 0.75rem;
-    font-weight: 700;
+/* Keep the "urgent" checkbox in the task bar tight and vertically centred. */
+[data-testid="stMain"] [data-testid="stForm"] [data-testid="stCheckbox"] label {
+    margin-bottom: 0;
     white-space: nowrap;
-    box-shadow: 0 1px 6px rgba(192, 32, 47, 0.12);
-}
-[class*="st-key-task_urgent_on_"] button:hover {
-    background: #fbdcdc !important;
-    border-color: rgba(192, 32, 47, 0.5) !important;
 }
 
-/* Urgency toggle — inactive state: greyed-out, quiet until hovered. */
-[class*="st-key-task_urgent_off_"] button {
-    background: transparent !important;
-    border: 1px dashed #d7dbe4 !important;
-    border-radius: 999px !important;
-    padding: 0.12rem 0.5rem;
-    min-height: 0;
-    font-size: 0.75rem;
-    filter: grayscale(1);
-    opacity: 0.45;
-    box-shadow: none;
-    transition: opacity 0.15s ease, filter 0.15s ease;
-}
-[class*="st-key-task_urgent_off_"] button:hover {
-    opacity: 1;
-    filter: grayscale(0);
-    border-style: solid !important;
-    border-color: rgba(192, 32, 47, 0.45) !important;
-    transform: none;
-}
-
-/* Urgent tag inside a not-yet-synced task echo. */
-.task-urgent {
+/* Urgency level pill, shown under the urgency dropdown and inside the
+   home-screen urgent-tasks widget. Traffic-light palette: green/amber/red
+   reads instantly regardless of language. */
+.urgency-pill {
     display: inline-block;
-    background: #fdecec;
-    color: #c0202f;
-    border: 1px solid rgba(192, 32, 47, 0.28);
     border-radius: 999px;
-    padding: 0.05rem 0.5rem;
-    margin-inline-end: 0.35rem;
-    font-size: 0.72rem;
+    padding: 0.05rem 0.55rem;
+    margin-inline-end: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+.urgency-pill.urgency-low    { background: #e8f7ee; color: #137a3f; }
+.urgency-pill.urgency-medium { background: #fff4e0; color: #a8620a; }
+.urgency-pill.urgency-high   { background: #fdecec; color: #c0202f; }
+
+/* Status pill, used only in the home-screen urgent widget (the task-board
+   card itself uses the interactive dropdown, not a static pill). */
+.task-status-pill {
+    display: inline-block;
+    background: rgba(35, 33, 58, 0.07);
+    color: #23213a;
+    border-radius: 999px;
+    padding: 0.05rem 0.55rem;
+    margin-inline-end: 0.3rem;
+    font-size: 0.7rem;
     font-weight: 700;
     vertical-align: middle;
     white-space: nowrap;
 }
 
-/* Keep the "urgent" checkbox in the task bar tight and vertically centred. */
-[data-testid="stMain"] [data-testid="stForm"] [data-testid="stCheckbox"] label {
-    margin-bottom: 0;
+/* Small blue "unread" badge — chat tab label, task-comments expander,
+   urgent-tasks widget. Apple's system blue, not the app's Apple-blue accent
+   (#0a84ff) used for primary actions, so an unread signal never looks like
+   a clickable button. */
+.unread-badge {
+    display: inline-block;
+    background: #007AFF;
+    color: #ffffff;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    vertical-align: middle;
     white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.35);
+}
+
+/* List-view header row above the task cards. Same column widths as the
+   cards themselves (see ui_components.TASK_ROW_COLUMNS), styled as quiet
+   column labels rather than another card. */
+[class*="st-key-task_list_header"] {
+    padding: 0 1.25rem;
+    margin-bottom: 0.35rem;
+}
+.task-col-header {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #7a8194;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+/* Status-filter multiselect pills: Apple-style vibrant green instead of
+   Streamlit's default red/coral accent (this app has no [theme] section in
+   .streamlit/config.toml, so multiselect tags fall back to Streamlit's own
+   default primaryColor). Scoped to this one filter, not a global theme
+   override, so other widgets keep the app's usual blue accent. */
+[class*="st-key-task_status_filter_"] [data-baseweb="tag"] {
+    background-color: #28a745 !important;
+    border-color: #28a745 !important;
+}
+[class*="st-key-task_status_filter_"] [data-baseweb="tag"] span {
+    color: #ffffff !important;
 }
 
 /* Task board revamp: Apple-style task cards ------------------------------ */
@@ -515,32 +538,24 @@ a.task-mail:hover {
     direction: rtl;
 }
 
-/* Floating project bubbles (scoped to the bubbles container only). */
-.st-key-project_bubbles [data-testid="stButton"] button {
-    direction: rtl;
-    width: 100%;
-    min-height: 116px;
-    padding: 1.4rem 1.35rem 1.2rem;
-    border: none;
-    border-radius: 24px;
+/* Project bubble cards. The card is now the wrapping keyed container (rich
+   HTML content: title, creator, activity summary) with a slim "open" button
+   underneath — button labels can't carry colored/grey text, only a small
+   markdown subset, so the rich part moved out of the button entirely. */
+[class*="st-key-card_bubble_"] {
     background: #ffffff;
+    border-radius: 24px;
+    padding: 1.3rem 1.35rem 1.1rem;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-    color: #23213a;
-    font-size: 1.05rem;
-    font-weight: 600;
-    text-align: right;
-    align-items: flex-start;
-    justify-content: center;
-    white-space: normal;
-    line-height: 1.5;
-    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-}
-
-/* Gradient accent bar at the top of every bubble (matches the brand logo). */
-.st-key-project_bubbles [data-testid="stButton"] {
     position: relative;
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
-.st-key-project_bubbles [data-testid="stButton"]::before {
+[class*="st-key-card_bubble_"]:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.10);
+}
+/* Gradient accent bar at the top of every bubble (matches the brand logo). */
+[class*="st-key-card_bubble_"]::before {
     content: "";
     position: absolute;
     top: 0;
@@ -550,24 +565,38 @@ a.task-mail:hover {
     border-radius: 0 0 4px 4px;
     background: linear-gradient(90deg, #4FB5CC 0%, #8C72A3 55%, #A71E85 100%);
     opacity: 0.7;
-    z-index: 1;
-    pointer-events: none;
 }
-.st-key-project_bubbles [data-testid="stButton"] button:hover {
-    transform: translateY(-6px);
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12);
+.project-bubble-title {
+    font-size: 1.05rem;
+    font-weight: 600;
     color: #23213a;
+    margin-bottom: 0.25rem;
 }
-.st-key-project_bubbles [data-testid="stButton"] button:active {
-    transform: translateY(-2px);
+.project-bubble-meta {
+    font-size: 0.8rem;
+    color: #7a8194;
 }
-.st-key-project_bubbles [data-testid="stButton"] button p {
-    text-align: right;
-    width: 100%;
-    margin: 0;
+/* The activity summary line requested as "subtle grey text under created by". */
+.project-activity-line {
+    font-size: 0.8rem;
+    color: #9aa1b2;
+    margin-top: 0.3rem;
+}
+[class*="st-key-card_bubble_"] [data-testid="stButton"] button {
+    margin-top: 0.9rem;
+    border-radius: 999px;
+    background: rgba(35, 33, 58, 0.06);
+    color: #23213a;
+    border: none;
+    box-shadow: none;
+    font-size: 0.85rem;
+}
+[class*="st-key-card_bubble_"] [data-testid="stButton"] button:hover {
+    background: #0a84ff;
+    color: #ffffff;
 }
 
-/* Urgent-tasks widget: white Apple card with red-tinted mini-card rows. */
+/* Urgent-tasks widget: white Apple card holding one mini-card per task. */
 .st-key-urgent_widget {
     background: #ffffff;
     border: none;
@@ -575,30 +604,42 @@ a.task-mail:hover {
     padding: 1.15rem 1.25rem;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
-.st-key-urgent_widget [data-testid="stButton"] button {
-    direction: rtl;
-    width: 100%;
-    background: rgba(255, 59, 48, 0.055);
-    border: none;
+[class*="st-key-urgent_card_"] {
+    background: rgba(255, 59, 48, 0.045);
     border-radius: 16px;
-    padding: 0.6rem 0.95rem;
-    text-align: right;
-    justify-content: flex-start;
-    white-space: normal;
-    line-height: 1.45;
-    color: #23213a;
-    box-shadow: none;
-    transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+    padding: 0.7rem 0.95rem;
+    margin-bottom: 0.55rem;
+    transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
-.st-key-urgent_widget [data-testid="stButton"] button:hover {
-    background: rgba(255, 59, 48, 0.10);
+[class*="st-key-urgent_card_"]:hover {
+    background: rgba(255, 59, 48, 0.09);
     transform: translateY(-2px);
     box-shadow: 0 6px 18px rgba(255, 59, 48, 0.12);
 }
-.st-key-urgent_widget [data-testid="stButton"] button p {
-    text-align: right;
-    width: 100%;
-    margin: 0;
+.urgent-card-title {
+    font-weight: 700;
+    color: #23213a;
+    margin-bottom: 0.2rem;
+}
+.urgent-card-meta {
+    font-size: 0.8rem;
+    color: #7a8194;
+}
+[class*="st-key-urgent_card_"] [data-testid="stButton"] button {
+    margin-top: 0.5rem;
+    width: auto;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #23213a;
+    border: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    font-size: 0.78rem;
+    padding: 0.2rem 0.8rem;
+    min-height: 0;
+}
+[class*="st-key-urgent_card_"] [data-testid="stButton"] button:hover {
+    background: #0a84ff;
+    color: #ffffff;
 }
 /* --- Chat: messages still in flight ------------------------------------- */
 /* st.container(key=...) emits an st-key-<key> class. Pending sends are muted

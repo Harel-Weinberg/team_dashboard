@@ -41,6 +41,7 @@ def _seed_activity(username: str) -> int:
     db.set_task_done(task["id"], True, username)  # sets completed_by
     db.add_comment(task["id"], "rename test note", username)
     db.add_chat_message(project_id, "rename test message", username)
+    db.mark_scope_read(username, db.SCOPE_PROJECT_CHAT, project_id)  # read_receipts row
     return project_id
 
 

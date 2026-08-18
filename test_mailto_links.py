@@ -163,22 +163,27 @@ def test_ui_renders_icon(pid):
     at = at.run()
     assert not at.exception, f"Dashboard crashed: {at.exception[0]}"
 
-    blocks = [m.value or "" for m in at.markdown if "משימה עם מייל" in (m.value or "")]
-    assert blocks, "Task row not rendered"
-    row = blocks[0]
-    assert 'class="task-mail"' in row, f"Mail icon missing: {row}"
-    assert 'href="mailto:' in row and "&amp;body=" in row, (
-        f"href must be an escaped mailto link: {row}"
+    title_blocks = [m.value or "" for m in at.markdown if "משימה עם מייל" in (m.value or "")]
+    assert title_blocks, "Task row not rendered"
+    # The mail icon now renders in its own column/markdown call (see
+    # _render_task's mail_col), separate from the title block, so it's found
+    # by scanning all rendered markdown rather than the title's own block.
+    mail_blocks = [m.value or "" for m in at.markdown if 'class="task-mail"' in (m.value or "")]
+    assert mail_blocks, "Mail icon missing from any rendered block"
+    icon_html = mail_blocks[0]
+    assert 'href="mailto:' in icon_html and "&amp;body=" in icon_html, (
+        f"href must be an escaped mailto link: {icon_html}"
     )
-    assert "📧" in row, "Expected the 📧 icon"
+    assert "📧" in icon_html, "Expected the 📧 icon"
     print("PASS: task row renders the 📧 mailto icon with a properly escaped href")
 
     # Now remove the assignee's email — the icon must disappear.
     db.set_user_contact(OTHER_USER, None, None)
     db.get_contacts.clear()
     at = at.run()
-    row = next(m.value for m in at.markdown if "משימה עם מייל" in (m.value or ""))
-    assert "task-mail" not in row, f"Icon should be hidden without an email: {row}"
+    assert not any('class="task-mail"' in (m.value or "") for m in at.markdown), (
+        "Icon should be hidden without an email"
+    )
     print("PASS: icon is hidden when the recipient has no email on file")
     db.set_user_contact(OTHER_USER, OTHER_EMAIL, None)
     db.get_contacts.clear()

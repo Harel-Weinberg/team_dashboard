@@ -196,7 +196,7 @@ def require_login() -> bool:
 def logout() -> None:
     for key in list(st.session_state.keys()):
         if key in (
-            "user", "role", "view", "task_status_override", "task_urgent_override",
+            "user", "role", "view", "task_status_override", "task_urgency_override",
             "_pending_writes", "pending_msgs",
         ) or str(
             key

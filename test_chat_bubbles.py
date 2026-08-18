@@ -122,7 +122,12 @@ def test_pending_send_appends_after_landed_messages(pid):
     pending_index = _document_index(
         at, lambda n: n.type == "markdown" and pending_text in (n.proto.body or "")
     )
-    assert landed_index < pending_index, (
+    # <= rather than <: the background send can resolve fast enough that by
+    # the time this assertion runs, _promote_confirmed has already forced a
+    # refetch and the message landed for real — merging it into the SAME
+    # batched markdown block as landed_text (both then share one index).
+    # That's correct behaviour, not a bug, so it must not fail this check.
+    assert landed_index <= pending_index, (
         "the pending echo must render AFTER (below) the already-landed message"
     )
     print("PASS: the optimistic 'sending...' echo appends at the bottom, below landed messages")

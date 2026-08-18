@@ -1,14 +1,21 @@
-"""Verify the "urgent" (דחוף) task status against the real Supabase database.
+"""Verify urgency (3-level: נמוך/בינוני/גבוה) against the real Supabase database.
 
 Run with:  python test_urgent_tasks.py
 
+is_urgent (boolean) is kept as an internal mirror of urgency — True only when
+urgency == 'גבוה' — so get_urgent_open_tasks(), the home-screen widget and
+notify_urgent_assignment() (all keyed on is_urgent, already relying on this
+file's coverage) needed no changes when urgency became a 3-level field.
+
 Covers:
-  1. is_urgent column exists and defaults to FALSE.
-  2. add_task(is_urgent=True) persists the flag.
-  3. Ordering: open urgent tasks sort above open regular tasks.
-  4. The task-creation form's urgent checkbox creates an urgent task (AppTest),
-     and the list renders the red "דחוף" tag for it.
-  5. A completed urgent task keeps its tag inside the dimmed wrapper.
+  1. is_urgent column exists and defaults to FALSE; urgency defaults to בינוני.
+  2. add_task(is_urgent=True) persists both is_urgent and urgency=גבוה.
+  3. Ordering: open urgent (is_urgent) tasks sort above open regular tasks.
+  4. The task-creation form's urgent checkbox creates a task with urgency=
+     גבוה (AppTest), and the pending echo renders the urgency pill for it.
+  5. A completed urgent task keeps both dropdowns (status, urgency).
+  6. The urgency dropdown round-trips through all 3 levels via the real UI,
+     keeping is_urgent in sync at every step.
 """
 
 import time
@@ -98,18 +105,22 @@ def test_form_creates_urgent_task(pid):
     at = submit.set_value(True).run()
     assert not at.exception, f"Submit crashed: {at.exception[0]}"
 
-    # The pending echo renders the inline tag immediately (it has no DB id yet).
-    assert any("task-urgent" in (m.value or "") and title in (m.value or "")
-               for m in at.markdown), "Urgent tag missing from the optimistic echo"
-    print("PASS: urgent checkbox in the form renders the דחוף tag instantly")
+    # The pending echo renders the urgency pill immediately (it has no DB id yet).
+    assert any("urgency-high" in (m.value or "") and title in (m.value or "")
+               for m in at.markdown), "Urgency pill missing from the optimistic echo"
+    print("PASS: urgent checkbox in the form renders the urgency pill instantly")
 
     at = _wait_for_sync(at)
     row = next(t for t in db.get_tasks(project_id=pid) if t["title"] == title)
     assert row["is_urgent"] is True, "Form-created task was not marked urgent in the DB"
-    # Once synced, urgency is shown by the interactive toggle (active state).
-    keys = [b.key for b in at.button if b.key]
-    assert f"task_urgent_on_{row['id']}" in keys, f"Active urgency toggle missing: {keys}"
-    print("PASS: form-created urgent task saved to Supabase and shows the active toggle")
+    assert row["urgency"] == db.URGENCY_HIGH, f"Expected urgency=גבוה, got {row['urgency']!r}"
+    # Once synced, urgency is shown by the interactive dropdown.
+    urgency_select = next(
+        (s for s in at.selectbox if s.key == f"task_urgency_{row['id']}"), None
+    )
+    assert urgency_select is not None, "Urgency dropdown missing"
+    assert urgency_select.value == db.URGENCY_HIGH, "Dropdown should show גבוה"
+    print("PASS: form-created urgent task saved to Supabase and shows in the dropdown")
     return at, row
 
 
@@ -121,50 +132,50 @@ def test_completed_urgent_is_dimmed(at, row):
     assert html_blocks, "Task not rendered"
     block = html_blocks[0]
     assert "task-done" in block and "<s>" in block, f"Completed task not struck/dimmed: {block}"
-    keys = [b.key for b in at.button if b.key]
-    assert f"task_urgent_on_{row['id']}" in keys, "Urgency toggle should survive completion"
+    urgency_select = next(s for s in at.selectbox if s.key == f"task_urgency_{row['id']}")
+    assert urgency_select.value == db.URGENCY_HIGH, "Urgency should survive completion"
     status = next(s for s in at.selectbox if s.key == f"task_status_{row['id']}")
     assert status.value == db.STATUS_DONE, f"Status dropdown should show {db.STATUS_DONE!r}"
     print("PASS: completed urgent task is struck through, dimmed, and keeps both controls")
 
 
-def test_ui_urgency_toggle(pid):
-    """Flip urgency from the task list, in both directions, through the real UI."""
+def test_ui_urgency_dropdown_round_trip(pid):
+    """Flip urgency from the task list, through all 3 levels, through the real UI."""
     db.add_task("משימה לסימון דחיפות", TEMP_ADMIN, TEMP_ADMIN, pid, "project")
     db.clear_task_caches()
     task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה לסימון דחיפות")
-    assert task["is_urgent"] is False
+    assert task["urgency"] == db.URGENCY_MEDIUM, f"Expected the neutral default, got {task['urgency']!r}"
 
     at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
     at.session_state["view"] = ("project", pid)
     at = at.run()
 
-    off_button = next(b for b in at.button if b.key == f"task_urgent_off_{task['id']}")
-    at = off_button.set_value(True).run()
-    assert not at.exception, f"Toggle crashed: {at.exception[0]}"
-    # Optimistic: the active toggle shows before the DB write is confirmed.
-    assert any(b.key == f"task_urgent_on_{task['id']}" for b in at.button), (
-        "Urgency should flip instantly (optimistic)"
-    )
-    print("PASS: clicking the greyed 🔥 marks a task urgent instantly (optimistic)")
+    urgency_key = f"task_urgency_{task['id']}"
+    dropdown = next(s for s in at.selectbox if s.key == urgency_key)
+    at = dropdown.set_value(db.URGENCY_HIGH).run()
+    assert not at.exception, f"Urgency change crashed: {at.exception[0]}"
+    # Optimistic: the new level shows before the DB write is confirmed.
+    dropdown = next(s for s in at.selectbox if s.key == urgency_key)
+    assert dropdown.value == db.URGENCY_HIGH, "Urgency should flip instantly (optimistic)"
+    print("PASS: selecting גבוה marks a task urgent instantly (optimistic)")
 
     at = _wait_for_sync(at)
     db.clear_task_caches()
-    assert next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])["is_urgent"]
-    assert task["id"] not in _ss(at, "task_urgent_override", {}), "Override should be pruned"
-    print("PASS: urgency change synced to Supabase and the override was pruned")
+    fresh = next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])
+    assert fresh["urgency"] == db.URGENCY_HIGH and fresh["is_urgent"] is True
+    assert task["id"] not in _ss(at, "task_urgency_override", {}), "Override should be pruned"
+    print("PASS: urgency change synced to Supabase (urgency + is_urgent both updated)")
 
-    on_button = next(b for b in at.button if b.key == f"task_urgent_on_{task['id']}")
-    at = on_button.set_value(True).run()
-    assert any(b.key == f"task_urgent_off_{task['id']}" for b in at.button), (
-        "Clicking the active toggle should clear urgency"
-    )
+    dropdown = next(s for s in at.selectbox if s.key == urgency_key)
+    at = dropdown.set_value(db.URGENCY_LOW).run()
+    assert not at.exception, f"Urgency change crashed: {at.exception[0]}"
     at = _wait_for_sync(at)
     db.clear_task_caches()
-    assert not next(
-        t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
-    )["is_urgent"]
-    print("PASS: clicking the active 🔥 דחוף clears urgency and syncs")
+    fresh = next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])
+    assert fresh["urgency"] == db.URGENCY_LOW and fresh["is_urgent"] is False, (
+        "Selecting the LOW level must also clear is_urgent"
+    )
+    print("PASS: selecting נמוך clears is_urgent and syncs")
     return at, task
 
 
@@ -225,7 +236,7 @@ def test_no_rerun_loop(pid):
     assert sorted(s.key for s in at.selectbox if s.key) == first_selects, (
         "Selectboxes changed between reruns"
     )
-    assert not _ss(at, "task_urgent_override", {}), "Stale urgency overrides left behind"
+    assert not _ss(at, "task_urgency_override", {}), "Stale urgency overrides left behind"
     assert not _ss(at, "task_status_override", {}), "Stale status overrides left behind"
     print("PASS: repeated reruns are stable — no rerun loop, no stale overrides")
 
@@ -240,7 +251,7 @@ if __name__ == "__main__":
         test_toggle_urgency(pid)
         at, row = test_form_creates_urgent_task(pid)
         test_completed_urgent_is_dimmed(at, row)
-        at, task = test_ui_urgency_toggle(pid)
+        at, task = test_ui_urgency_dropdown_round_trip(pid)
         test_ui_status_dropdown_round_trip(pid, task)
         test_no_rerun_loop(pid)
     finally:

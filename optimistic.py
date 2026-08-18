@@ -79,7 +79,7 @@ def discard_echoes() -> None:
     for key in [k for k in st.session_state if str(k).startswith("optimistic_")]:
         st.session_state.pop(key, None)
     st.session_state.pop("task_status_override", None)
-    st.session_state.pop("task_urgent_override", None)
+    st.session_state.pop("task_urgency_override", None)
     # Chat echoes are tagged with the sender's name too.
     st.session_state.pop("pending_msgs", None)
 

@@ -211,16 +211,18 @@ CREATE TABLE IF NOT EXISTS project_chat (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Per-user chat read state, for the unread badges on the home screen.
--- project_id carries the same ON DELETE CASCADE as every other child table so
--- deleting a project cannot leave orphan read markers behind. username is a
--- plain column on purpose: rename_user() deliberately re-attributes identity
--- columns explicitly rather than leaning on ON UPDATE CASCADE.
-CREATE TABLE IF NOT EXISTS chat_reads (
+-- Per-user read state, generic across the two things that carry an unread
+-- count: a project's chat (scope_type='project_chat', scope_id=project_id)
+-- and a single task's comment thread (scope_type='task_comments',
+-- scope_id=task_id). No FK on scope_id — it points at different tables
+-- depending on scope_type — so cleanup on delete is explicit (see
+-- delete_project/delete_task) rather than ON DELETE CASCADE.
+CREATE TABLE IF NOT EXISTS read_receipts (
     username      TEXT NOT NULL,
-    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    scope_type    TEXT NOT NULL,
+    scope_id      INTEGER NOT NULL,
     last_read_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (username, project_id)
+    PRIMARY KEY (username, scope_type, scope_id)
 );
 """
 
@@ -285,6 +287,25 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_data BYTEA;
 -- sender+body text. The partial unique index below also makes the INSERT
 -- idempotent, so a retried write cannot double-post.
 ALTER TABLE project_chat ADD COLUMN IF NOT EXISTS client_msg_id TEXT;
+
+-- chat_reads (a first attempt at read tracking, project-chat-only, never
+-- wired into any application code) is superseded by the generic
+-- read_receipts table above, which also covers task comment threads.
+-- Safe to drop outright: zero rows, zero code ever read or wrote it.
+DROP TABLE IF EXISTS chat_reads;
+
+-- Urgency becomes a 3-level field (נמוך/בינוני/גבוה) instead of a boolean,
+-- to match the status dropdown's UI pattern. is_urgent remains as an
+-- internal mirror (is_urgent = urgency = 'גבוה') for the exact same reason
+-- status kept is_done in sync: get_urgent_open_tasks(), the home-screen
+-- urgent widget, the urgent-task sort order, and notify_urgent_assignment()
+-- are all keyed on is_urgent and already tested — "not flagged urgent"
+-- maps to the neutral middle level, not the bottom one, since that was the
+-- implicit default every task had before this column existed.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS urgency TEXT;
+UPDATE tasks SET urgency = CASE WHEN is_urgent THEN 'גבוה' ELSE 'בינוני' END
+ WHERE urgency IS NULL;
+ALTER TABLE tasks ALTER COLUMN urgency SET DEFAULT 'בינוני';
 """
 
 
@@ -299,7 +320,8 @@ CREATE INDEX IF NOT EXISTS idx_task_status   ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
     ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads (username);
+CREATE INDEX IF NOT EXISTS idx_read_receipts_scope
+    ON read_receipts (scope_type, scope_id);
 """
 
 # Every column that stores a username as identity-tagging metadata. Renaming a
@@ -313,6 +335,7 @@ _IDENTITY_COLUMNS = (
     ("tasks", "completed_by"),
     ("task_comments", "author"),
     ("project_chat", "sender"),
+    ("read_receipts", "username"),
 )
 
 # Seeded only when the users table is empty (or a legacy row has no password),
@@ -405,7 +428,9 @@ def clear_all_caches() -> None:
     _invalidate(
         get_users, get_users_detailed, get_contacts, get_projects,
         _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
-        get_chat, get_task_attachment,
+        get_chat, get_task_attachment, get_open_task_counts,
+        get_chat_unread_counts, get_task_comment_unread_counts,
+        get_unread_counts_for_tasks,
     )
 
 
@@ -495,8 +520,14 @@ def set_user_password(username: str, password_hash: str) -> None:
 
 def delete_user(username: str) -> None:
     with get_cursor() as cur:
+        # Unlike other identity columns (tasks.assignee, project_chat.sender,
+        # ...), a deleted user's read-state has no historical value worth
+        # keeping as a dangling row — clean it up. This is the one identity
+        # column where "orphaned" isn't the intended, established behavior.
+        cur.execute("DELETE FROM read_receipts WHERE username = %s", (username,))
         cur.execute("DELETE FROM users WHERE username = %s", (username,))
     _clear_user_caches()
+    _invalidate(get_chat_unread_counts, get_task_comment_unread_counts, get_unread_counts_for_tasks)
 
 
 def count_admins() -> int:
@@ -611,8 +642,16 @@ def add_project(name: str, user: str) -> int | None:
 def delete_project(project_id: int) -> None:
     """Remove a project and (via ON DELETE CASCADE) its spec, tasks, comments and chat."""
     with get_cursor() as cur:
+        # read_receipts has no FK on scope_id (it points at different tables
+        # depending on scope_type), so it doesn't get an automatic CASCADE —
+        # clean up this project's chat read-state explicitly. Task-comment
+        # read-state cascades on its own via the task delete below.
+        cur.execute(
+            "DELETE FROM read_receipts WHERE scope_type = %s AND scope_id = %s",
+            (SCOPE_PROJECT_CHAT, project_id),
+        )
         cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-    _invalidate(get_projects)
+    _invalidate(get_projects, get_chat_unread_counts)
     _clear_task_caches()  # also clears _project_bundle (spec/comments/chat included)
 
 
@@ -708,10 +747,23 @@ def get_urgent_open_tasks() -> list[dict]:
         return cur.fetchall()
 
 
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_open_task_counts() -> dict[int, int]:
+    """project_id -> count of open (not done) tasks, for the home-screen
+    project cards' activity summary. One query, every project at once."""
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT project_id, COUNT(*) AS n FROM tasks "
+            "WHERE project_id IS NOT NULL AND NOT is_done "
+            "GROUP BY project_id"
+        )
+        return {row["project_id"]: row["n"] for row in cur.fetchall()}
+
+
 def _clear_task_caches() -> None:
     _invalidate(
         _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
-        get_task_attachment,
+        get_task_attachment, get_open_task_counts,
     )
 
 
@@ -730,6 +782,13 @@ STATUS_IN_REVIEW = "בבירור"
 STATUS_DONE = "בוצע"
 TASK_STATUSES = (STATUS_IN_PROGRESS, STATUS_IN_REVIEW, STATUS_DONE)
 
+# Urgency: a 3-level field mirrored onto the boolean is_urgent
+# (is_urgent = urgency == URGENCY_HIGH) — see the _MIGRATIONS comment for why.
+URGENCY_LOW = "נמוך"
+URGENCY_MEDIUM = "בינוני"
+URGENCY_HIGH = "גבוה"
+TASK_URGENCY_LEVELS = (URGENCY_LOW, URGENCY_MEDIUM, URGENCY_HIGH)
+
 
 def add_task(
     title: str,
@@ -746,17 +805,22 @@ def add_task(
 ) -> None:
     """`attachment` is (filename, mime_type, raw_bytes), or None."""
     att_name, att_type, att_data = attachment if attachment else (None, None, None)
+    # Mirror is_urgent -> urgency the same way set_task_urgent does — without
+    # this, a task created with is_urgent=True would land on urgency's column
+    # DEFAULT ('בינוני') instead, inconsistent with is_urgent=True from the
+    # moment it's created.
+    urgency = URGENCY_HIGH if is_urgent else URGENCY_MEDIUM
     with get_cursor() as cur:
         cur.execute(
             """
             INSERT INTO tasks (
-                project_id, task_type, title, assignee, created_by, is_urgent,
+                project_id, task_type, title, assignee, created_by, is_urgent, urgency,
                 description, due_date, tags, attachment_name, attachment_type, attachment_data
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                project_id, task_type, title, assignee, user, is_urgent,
+                project_id, task_type, title, assignee, user, is_urgent, urgency,
                 description, due_date, tags or [], att_name, att_type,
                 psycopg2.Binary(att_data) if att_data else None,
             ),
@@ -765,8 +829,31 @@ def add_task(
 
 
 def set_task_urgent(task_id: int, urgent: bool) -> None:
+    """Boolean compatibility entry point. Also keeps `urgency` in sync:
+    True -> URGENCY_HIGH, False -> URGENCY_MEDIUM (a task lowered this way
+    always lands on the neutral middle level, never URGENCY_LOW — that
+    finer distinction only exists via set_task_urgency, the dropdown's own
+    write path).
+    """
+    urgency = URGENCY_HIGH if urgent else URGENCY_MEDIUM
     with get_cursor() as cur:
-        cur.execute("UPDATE tasks SET is_urgent = %s WHERE id = %s", (urgent, task_id))
+        cur.execute(
+            "UPDATE tasks SET is_urgent = %s, urgency = %s WHERE id = %s",
+            (urgent, urgency, task_id),
+        )
+    _clear_task_caches()
+
+
+def set_task_urgency(task_id: int, urgency: str) -> None:
+    """Primary write path for the urgency dropdown. One atomic UPDATE keeps
+    urgency and is_urgent consistent."""
+    if urgency not in TASK_URGENCY_LEVELS:
+        raise ValueError(f"unknown urgency level: {urgency!r}")
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE tasks SET urgency = %s, is_urgent = %s WHERE id = %s",
+            (urgency, urgency == URGENCY_HIGH, task_id),
+        )
     _clear_task_caches()
 
 
@@ -818,6 +905,12 @@ def set_task_status(task_id: int, status: str, user: str) -> None:
 
 def delete_task(task_id: int) -> None:
     with get_cursor() as cur:
+        # Same reasoning as delete_project: read_receipts has no FK, so this
+        # task's comment-thread read-state needs an explicit delete too.
+        cur.execute(
+            "DELETE FROM read_receipts WHERE scope_type = %s AND scope_id = %s",
+            (SCOPE_TASK_COMMENTS, task_id),
+        )
         cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
     _clear_task_caches()  # comments cascade with the task; _board_comments included
 
@@ -856,7 +949,110 @@ def add_comment(task_id: int, content: str, user: str) -> None:
             "INSERT INTO task_comments (task_id, author, content) VALUES (%s, %s, %s)",
             (task_id, user, content),
         )
-    _invalidate(_project_bundle, _board_comments)
+    _invalidate(_project_bundle, _board_comments, get_task_comment_unread_counts,
+                get_unread_counts_for_tasks)
+
+
+# ---------------------------------------------------------------------------
+# Read receipts (unread badges for project chat + task comment threads)
+# ---------------------------------------------------------------------------
+
+SCOPE_PROJECT_CHAT = "project_chat"
+SCOPE_TASK_COMMENTS = "task_comments"
+
+
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_chat_unread_counts(username: str) -> dict[int, int]:
+    """project_id -> count of chat messages from someone else posted after
+    this user's last_read_at for that project. One query, every project at
+    once — feeds both the home-screen project cards and the chat tab badge.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.project_id, COUNT(*) AS n
+            FROM project_chat c
+            LEFT JOIN read_receipts r
+                   ON r.username = %(user)s AND r.scope_type = %(scope)s
+                  AND r.scope_id = c.project_id
+            WHERE c.sender IS DISTINCT FROM %(user)s
+              AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+            GROUP BY c.project_id
+            """,
+            {"user": username, "scope": SCOPE_PROJECT_CHAT},
+        )
+        return {row["project_id"]: row["n"] for row in cur.fetchall()}
+
+
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_task_comment_unread_counts(
+    username: str, project_id: int | None = None, task_type: str = "project"
+) -> dict[int, int]:
+    """task_id -> unread comment count, scoped the same way get_comments_map is."""
+    with get_cursor() as cur:
+        scope_filter = (
+            "t.project_id = %(pid)s" if project_id is not None
+            else "t.task_type = %(tt)s AND t.project_id IS NULL"
+        )
+        cur.execute(
+            f"""
+            SELECT c.task_id, COUNT(*) AS n
+            FROM task_comments c
+            JOIN tasks t ON t.id = c.task_id
+            LEFT JOIN read_receipts r
+                   ON r.username = %(user)s AND r.scope_type = %(scope)s
+                  AND r.scope_id = c.task_id
+            WHERE {scope_filter}
+              AND c.author IS DISTINCT FROM %(user)s
+              AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+            GROUP BY c.task_id
+            """,  # noqa: S608 — scope_filter is one of two hard-coded literals, never user input
+            {"user": username, "scope": SCOPE_TASK_COMMENTS, "pid": project_id, "tt": task_type},
+        )
+        return {row["task_id"]: row["n"] for row in cur.fetchall()}
+
+
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_unread_counts_for_tasks(username: str, task_ids: tuple[int, ...]) -> dict[int, int]:
+    """Same as get_task_comment_unread_counts, but for an explicit, arbitrary
+    set of task ids instead of one (project_id, task_type) scope — for the
+    home-screen urgent-tasks widget, whose tasks can span many different
+    projects and both ad-hoc task types at once. `task_ids` is a tuple (not
+    a list) so it hashes cleanly as an st.cache_data key.
+    """
+    if not task_ids:
+        return {}
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.task_id, COUNT(*) AS n
+            FROM task_comments c
+            LEFT JOIN read_receipts r
+                   ON r.username = %(user)s AND r.scope_type = %(scope)s
+                  AND r.scope_id = c.task_id
+            WHERE c.task_id = ANY(%(ids)s)
+              AND c.author IS DISTINCT FROM %(user)s
+              AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+            GROUP BY c.task_id
+            """,
+            {"user": username, "scope": SCOPE_TASK_COMMENTS, "ids": list(task_ids)},
+        )
+        return {row["task_id"]: row["n"] for row in cur.fetchall()}
+
+
+def mark_scope_read(username: str, scope_type: str, scope_id: int) -> None:
+    """Upsert last_read_at = now() for one (username, scope_type, scope_id)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO read_receipts (username, scope_type, scope_id, last_read_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (username, scope_type, scope_id)
+            DO UPDATE SET last_read_at = NOW()
+            """,
+            (username, scope_type, scope_id),
+        )
+    _invalidate(get_chat_unread_counts, get_task_comment_unread_counts, get_unread_counts_for_tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +1118,11 @@ def add_chat_message(
             (project_id, user, message, client_msg_id),
         )
     _refresh_chat_after_write()
+    # Unlike get_chat/get_chat_watermark, unread counts are for OTHER users —
+    # staleness here never stalls the sender's own render, so this always
+    # invalidates (deferred to the render thread when called from a worker,
+    # same as every other task/comment write).
+    _invalidate(get_chat_unread_counts)
 
 
 def _refresh_chat_after_write() -> None:

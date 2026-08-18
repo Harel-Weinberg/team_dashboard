@@ -248,28 +248,35 @@ def _on_status_change(widget_key: str, task: dict):
     _set_task_status(task, st.session_state[widget_key])
 
 
-def _set_task_urgent(task: dict, new_value: bool):
-    """Optimistically flip a task's urgent flag and sync in the background."""
+def _set_task_urgency(task: dict, new_level: str):
+    """Optimistically switch a task's urgency level and sync in the background."""
     future = optimistic.submit_write(
-        "סטטוס דחיפות", db.set_task_urgent, task["id"], new_value
+        "רמת דחיפות", db.set_task_urgency, task["id"], new_level
     )
-    st.session_state.setdefault("task_urgent_override", {})[task["id"]] = {
-        "value": new_value,
+    st.session_state.setdefault("task_urgency_override", {})[task["id"]] = {
+        "value": new_level,
         "future": future,
     }
 
 
-def _effective_urgent(task: dict) -> bool:
-    """Urgency to display: a pending local toggle wins until the DB confirms it."""
-    overrides = st.session_state.setdefault("task_urgent_override", {})
+def _on_urgency_change(widget_key: str, task: dict):
+    """on_change handler for a task's urgency selectbox."""
+    _set_task_urgency(task, st.session_state[widget_key])
+
+
+def _effective_urgency(task: dict) -> tuple[str, bool]:
+    """Return (urgency level to display, whether an optimistic override is in flight)."""
+    overrides = st.session_state.setdefault("task_urgency_override", {})
     override = overrides.get(task["id"])
     if override is not None:
         future = override["future"]
-        landed = bool(task.get("is_urgent")) == override["value"]
+        landed = task.get("urgency") == override["value"]
         if future.done() and (future.exception() is not None or landed):
             overrides.pop(task["id"])  # failed (revert to DB truth) or confirmed
             override = None
-    return override["value"] if override else bool(task.get("is_urgent"))
+    if override is not None:
+        return override["value"], True
+    return task.get("urgency") or db.URGENCY_MEDIUM, False
 
 
 def _effective_status(task: dict) -> tuple[str, bool]:
@@ -338,32 +345,11 @@ def _fmt_date(value) -> str:
     return str(value)  # defensive: an ISO string that _revive() didn't reach
 
 
-def _task_title_html(
-    title: str,
-    is_done: bool,
-    is_urgent: bool = False,
-    tags: list[str] | None = None,
-    mailto: str | None = None,
-) -> str:
-    """Task title: urgent tag, then tag pills, then bold/struck-through title."""
-    safe_title = html.escape(title)
-    parts = []
-    if is_urgent:
-        parts.append('<span class="task-urgent">🔥 דחוף</span>')
-    tag_html = _tag_pills_html(tags)
-    if tag_html:
-        parts.append(tag_html)
-    parts.append(f"<s>{safe_title}</s>" if is_done else f"<strong>{safe_title}</strong>")
-    body = " ".join(parts)
-    # When completed, dim the whole line (tags included) — but keep the mail
-    # link outside the dimmed wrapper so it stays clearly clickable.
-    if is_done:
-        body = f'<span class="task-done">{body}</span>'
-    return body + _mail_icon_html(mailto, is_done)
-
-
 def _task_meta_line(task_or_echo: dict) -> str:
-    """👤 assignee · 📅 due date — both optional, shown before the created/synced line."""
+    """👤 assignee · 📅 due date — both optional. Used by the pending-task
+    row, which (having no columns to align with a header) keeps the old
+    compact single-line format instead of _render_task's per-column layout.
+    """
     parts = []
     assignee = task_or_echo.get("assignee")
     if assignee:
@@ -374,148 +360,234 @@ def _task_meta_line(task_or_echo: dict) -> str:
     return " · ".join(parts)
 
 
-def _render_task(task: dict, comments: list[dict]):
-    """An Apple-style card: status dropdown, urgency toggle, title/tags,
-    description, assignee/due date, attachment, mailto, and a bubble-styled
-    comment thread — all in one keyed container (also what lets theme.py
-    give it rounded corners and a shadow, and what a still-in-flight status
-    change would mute if that mattered here — it doesn't: unlike chat, a
-    task-status change has no "failed, please retry" UI, matching the
+URGENCY_CSS_CLASS = {
+    db.URGENCY_LOW: "urgency-low",
+    db.URGENCY_MEDIUM: "urgency-medium",
+    db.URGENCY_HIGH: "urgency-high",
+}
+
+
+def _urgency_pill_html(level: str) -> str:
+    css_class = URGENCY_CSS_CLASS.get(level, "urgency-medium")
+    return f'<span class="urgency-pill {css_class}">{html.escape(level)}</span>'
+
+
+def _task_title_html(title: str, is_done: bool, tags: list[str] | None = None) -> str:
+    """Task name: tag pills, then bold/struck-through title.
+
+    Urgency has its own dedicated column in the list-view layout (see
+    _render_task) rather than an inline pill here.
+    """
+    safe_title = html.escape(title)
+    parts = []
+    tag_html = _tag_pills_html(tags)
+    if tag_html:
+        parts.append(tag_html)
+    parts.append(f"<s>{safe_title}</s>" if is_done else f"<strong>{safe_title}</strong>")
+    body = " ".join(parts)
+    if is_done:
+        body = f'<span class="task-done">{body}</span>'
+    return body
+
+
+def _unread_badge_html(count: int) -> str:
+    """Small blue unread-count badge. Empty string at count<=0 — never show
+    a badge for zero, per the explicit "only when unread > 0" requirement."""
+    if count <= 0:
+        return ""
+    return f'<span class="unread-badge">🔵 {count}</span>'
+
+
+def _mark_scope_viewed(scope_type: str, scope_id: int, items: list[dict]) -> None:
+    """Debounced read-receipt update for a project chat or task-comments scope.
+
+    Writes only when the newest item is newer than what this session already
+    marked read for this scope — without that, a 500ms/1s poll tick would
+    re-upsert last_read_at every single tick regardless of whether anything
+    new arrived, which is exactly the "infinite loop" of writes the original
+    request calls out to avoid. `items` must be sorted oldest-first (both
+    get_chat() and get_comments_map() already are).
+
+    One limitation, stated plainly rather than hidden: st.tabs (in the mode
+    this app uses) and st.expander both compute their content unconditionally
+    regardless of whether they're the visually selected/open one, so this
+    can't distinguish "the user is looking at this exact tab/expander" from
+    "this project is open at all in this session". "Unread" here means
+    "arrived since this scope was last processed while the project/task
+    board was open", which is coarser than true view-tracking but is the
+    honest limit of what these widgets expose without switching them to
+    lazy (on_change="rerun") rendering — a bigger change than asked for here.
+    """
+    if not items:
+        return
+    newest = items[-1].get("created_at")
+    if newest is None:
+        return
+    marked = st.session_state.setdefault("read_marked_through", {})
+    key = (scope_type, scope_id)
+    if marked.get(key) == newest:
+        return
+    marked[key] = newest
+    user = st.session_state["user"]
+    optimistic.submit_write("עדכון סטטוס קריאה", db.mark_scope_read, user, scope_type, scope_id)
+
+
+# List-view column layout: status | urgency | name+tags+description |
+# assignee | due date | email. Used by both the header row and every task
+# card so they align exactly.
+TASK_ROW_COLUMNS = [0.13, 0.13, 0.34, 0.15, 0.15, 0.10]
+TASK_ROW_HEADERS = ["סטטוס משימה", "דחיפות", "שם המשימה", "מפתח אחראי", "תאריך יעד", "מייל"]
+
+
+def _render_task_header():
+    """Column headers above the task list — st.columns with the exact same
+    widths as _render_task, so header and card cells line up."""
+    with st.container(key="task_list_header"):
+        for col, label in zip(st.columns(TASK_ROW_COLUMNS), TASK_ROW_HEADERS):
+            col.markdown(f'<div class="task-col-header">{label}</div>', unsafe_allow_html=True)
+
+
+def _render_task(task: dict, comments: list[dict], unread_comments: int = 0):
+    """An Apple-style list row: status/urgency dropdowns, name+tags+
+    description, assignee, due date and a mailto icon — six columns aligned
+    with _render_task_header — plus attachment/comments below, all inside
+    one keyed container (also what lets theme.py give it rounded corners
+    and a shadow). A still-in-flight status/urgency change isn't muted here:
+    unlike chat, a task write has no "failed, please retry" UI, matching the
     pre-existing philosophy for every other task write in this file, so
     there's no separate muted/failed visual state to drive from the Future).
     """
     user = st.session_state["user"]
-    status, syncing = _effective_status(task)
+    status, status_syncing = _effective_status(task)
     is_done = status == db.STATUS_DONE
-    is_urgent = _effective_urgent(task)
+    urgency, urgency_syncing = _effective_urgency(task)
     status_key = f"task_status_{task['id']}"
+    urgency_key = f"task_urgency_{task['id']}"
 
     # If another user changed the task in the DB, let the DB value win.
     if status_key in st.session_state and st.session_state[status_key] != status:
         del st.session_state[status_key]
+    if urgency_key in st.session_state and st.session_state[urgency_key] != urgency:
+        del st.session_state[urgency_key]
 
     with st.container(key=f"task_card_{task['id']}"):
-        # Top-aligned so the status/urgency controls line up with the task
-        # title rather than being centred against the title + metadata block.
-        status_col, urgent_col, body_col = st.columns(
-            [0.20, 0.10, 0.70], vertical_alignment="top"
+        status_col, urgency_col, name_col, assignee_col, date_col, mail_col = st.columns(
+            TASK_ROW_COLUMNS, vertical_alignment="top"
         )
         with status_col:
             st.selectbox(
                 "סטטוס", db.TASK_STATUSES,
                 index=db.TASK_STATUSES.index(status),
                 key=status_key, label_visibility="collapsed",
-                # No manual rerun here — Streamlit already reruns the enclosing
-                # fragment once after an on_change callback returns (the exact
-                # idiom the urgency toggle below and the checkbox it replaced
-                # both relied on); calling _rerun_scoped() too would just be a
-                # second, redundant rerun, not a loop, but there's no reason
-                # to pay for it.
+                # No manual rerun here — Streamlit already reruns the
+                # enclosing fragment once after an on_change callback
+                # returns; calling _rerun_scoped() too would just be a
+                # second, redundant rerun, not a loop, but there's no
+                # reason to pay for it. Same idiom for urgency below.
                 on_change=_on_status_change, args=(status_key, task),
                 help="שינוי סטטוס המשימה",
             )
-        with urgent_col:
-            # Interactive urgency toggle. Two distinct keys (on/off) so each
-            # state can be styled independently in theme.py.
-            if is_urgent:
-                if st.button(
-                    "🔥 דחוף",
-                    key=f"task_urgent_on_{task['id']}",
-                    help="לחצו כדי לבטל את סימון הדחיפות",
-                ):
-                    _set_task_urgent(task, False)
-                    st.rerun()
-            elif st.button(
-                "🔥",
-                key=f"task_urgent_off_{task['id']}",
-                help="לחצו כדי לסמן את המשימה כדחופה",
-            ):
-                _set_task_urgent(task, True)
-                st.rerun()
-        with body_col:
-            st.markdown(
-                _task_title_html(
-                    task["title"], is_done, is_urgent, task.get("tags"),
-                    mailto=notifications.build_mailto_link(task, is_done=is_done),
-                ),
-                unsafe_allow_html=True,
+        with urgency_col:
+            st.selectbox(
+                "דחיפות", db.TASK_URGENCY_LEVELS,
+                index=db.TASK_URGENCY_LEVELS.index(urgency),
+                key=urgency_key, label_visibility="collapsed",
+                on_change=_on_urgency_change, args=(urgency_key, task),
+                help="שינוי רמת הדחיפות",
             )
+            st.markdown(_urgency_pill_html(urgency), unsafe_allow_html=True)
+        with name_col:
+            st.markdown(_task_title_html(task["title"], is_done, task.get("tags")),
+                        unsafe_allow_html=True)
             if task.get("description"):
                 st.caption(task["description"])
+        with assignee_col:
+            if task.get("assignee"):
+                st.markdown(f"👤 {html.escape(task['assignee'])}")
+        with date_col:
+            due = _fmt_date(task.get("due_date"))
+            if due:
+                st.markdown(f"📅 {due}")
+        with mail_col:
+            mailto = notifications.build_mailto_link(task, is_done=is_done)
+            st.markdown(_mail_icon_html(mailto, is_done), unsafe_allow_html=True)
 
-            meta = _task_meta_line(task)
-            created = f"נוצר על ידי {task['created_by']} · {fmt_ts(task['created_at'])}"
-            meta = f"{meta} · {created}" if meta else created
-            if syncing:
-                meta += " · 🕓 מסתנכרן…"
-            elif is_done and task["completed_by"]:
-                meta += f" · ✅ בוצע על ידי {task['completed_by']} ב-{fmt_ts(task['completed_at'])}"
-            st.caption(meta)
+        meta = f"נוצר על ידי {task['created_by']} · {fmt_ts(task['created_at'])}"
+        if status_syncing or urgency_syncing:
+            meta += " · 🕓 מסתנכרן…"
+        elif is_done and task["completed_by"]:
+            meta += f" · ✅ בוצע על ידי {task['completed_by']} ב-{fmt_ts(task['completed_at'])}"
+        st.caption(meta)
 
-            if task.get("attachment_name"):
-                fetched = db.get_task_attachment(task["id"])
-                if fetched:
-                    name, mime, data = fetched
-                    st.download_button(
-                        "📎 הורדת קובץ מצורף", data=data, file_name=name,
-                        mime=mime or "application/octet-stream",
-                        key=f"task_attachment_dl_{task['id']}",
-                    )
+        if task.get("attachment_name"):
+            fetched = db.get_task_attachment(task["id"])
+            if fetched:
+                name, mime, data = fetched
+                st.download_button(
+                    "📎 הורדת קובץ מצורף", data=data, file_name=name,
+                    mime=mime or "application/octet-stream",
+                    key=f"task_attachment_dl_{task['id']}",
+                )
 
-            comment_echoes = st.session_state.setdefault("optimistic_comments", {})
-            pending_comments = optimistic.surviving_echoes(
-                comment_echoes.get(task["id"], []),
-                landed=lambda e: any(
-                    c["author"] == e["author"] and c["content"] == e["content"] for c in comments
-                ),
-            )
-            comment_echoes[task["id"]] = pending_comments
+        comment_echoes = st.session_state.setdefault("optimistic_comments", {})
+        pending_comments = optimistic.surviving_echoes(
+            comment_echoes.get(task["id"], []),
+            landed=lambda e: any(
+                c["author"] == e["author"] and c["content"] == e["content"] for c in comments
+            ),
+        )
+        comment_echoes[task["id"]] = pending_comments
 
-            with st.expander(f"💬 הערות ({len(comments) + len(pending_comments)})"):
-                # The exact same bubble markup as the project chat tab —
-                # rendered per-comment (not batched) since this list is short
-                # and some rows need their own muted-while-pending container.
-                for comment in comments:
+        badge = _unread_badge_html(unread_comments)
+        label = f"💬 הערות ({len(comments) + len(pending_comments)})"
+        with st.expander(label):
+            if badge:
+                st.markdown(badge, unsafe_allow_html=True)
+            _mark_scope_viewed(db.SCOPE_TASK_COMMENTS, task["id"], comments)
+            # The exact same bubble markup as the project chat tab —
+            # rendered per-comment (not batched) since this list is short
+            # and some rows need their own muted-while-pending container.
+            for comment in comments:
+                st.markdown(
+                    _chat_bubble_html(
+                        comment["author"], fmt_ts(comment["created_at"]),
+                        comment["content"], is_mine=comment["author"] == user,
+                    ),
+                    unsafe_allow_html=True,
+                )
+            for i, echo in enumerate(pending_comments):
+                with st.container(key=f"taskcommentpend_{task['id']}_{i}"):
                     st.markdown(
                         _chat_bubble_html(
-                            comment["author"], fmt_ts(comment["created_at"]),
-                            comment["content"], is_mine=comment["author"] == user,
+                            echo["author"], "שולח…", echo["content"], is_mine=True,
                         ),
                         unsafe_allow_html=True,
                     )
-                for i, echo in enumerate(pending_comments):
-                    with st.container(key=f"taskcommentpend_{task['id']}_{i}"):
-                        st.markdown(
-                            _chat_bubble_html(
-                                echo["author"], "שולח…", echo["content"], is_mine=True,
-                            ),
-                            unsafe_allow_html=True,
+
+            with st.form(f"comment_form_{task['id']}", clear_on_submit=True, border=False):
+                note = st.text_area(
+                    "הוספת הערה למשימה",
+                    height=80,
+                    placeholder="כתבו הערה על המשימה הזו...",
+                    key=f"comment_text_{task['id']}",
+                    label_visibility="collapsed",
+                )
+                if st.form_submit_button("💬 שמירת הערה"):
+                    text = note.strip()
+                    if text:
+                        future = optimistic.submit_write(
+                            "הערה למשימה", db.add_comment, task["id"], text, user
                         )
+                        comment_echoes.setdefault(task["id"], []).append(
+                            {"author": user, "content": text, "future": future}
+                        )
+                        _rerun_scoped()
 
-                with st.form(f"comment_form_{task['id']}", clear_on_submit=True, border=False):
-                    note = st.text_area(
-                        "הוספת הערה למשימה",
-                        height=80,
-                        placeholder="כתבו הערה על המשימה הזו...",
-                        key=f"comment_text_{task['id']}",
-                        label_visibility="collapsed",
-                    )
-                    if st.form_submit_button("💬 שמירת הערה"):
-                        text = note.strip()
-                        if text:
-                            future = optimistic.submit_write(
-                                "הערה למשימה", db.add_comment, task["id"], text, user
-                            )
-                            comment_echoes.setdefault(task["id"], []).append(
-                                {"author": user, "content": text, "future": future}
-                            )
-                            _rerun_scoped()
-
-                # Deleting stays synchronous on purpose: destructive actions
-                # should confirm against the DB before the row disappears.
-                if st.button("🗑️ מחיקת המשימה", key=f"task_delete_{task['id']}"):
-                    db.delete_task(task["id"])
-                    st.rerun()
+            # Deleting stays synchronous on purpose: destructive actions
+            # should confirm against the DB before the row disappears.
+            if st.button("🗑️ מחיקת המשימה", key=f"task_delete_{task['id']}"):
+                db.delete_task(task["id"])
+                st.rerun()
 
 
 def _render_pending_task(echo: dict, index: int):
@@ -525,11 +597,11 @@ def _render_pending_task(echo: dict, index: int):
         status_col, body_col = st.columns([0.22, 0.78], vertical_alignment="center")
         status_col.markdown("🕓")
         with body_col:
+            urgency_pill = _urgency_pill_html(
+                db.URGENCY_HIGH if echo.get("is_urgent") else db.URGENCY_MEDIUM
+            )
             st.markdown(
-                _task_title_html(
-                    echo["title"], is_done=False,
-                    is_urgent=echo.get("is_urgent", False), tags=echo.get("tags"),
-                ),
+                urgency_pill + " " + _task_title_html(echo["title"], False, echo.get("tags")),
                 unsafe_allow_html=True,
             )
             if echo.get("description"):
@@ -538,7 +610,7 @@ def _render_pending_task(echo: dict, index: int):
             st.caption(f"{meta} · מסתנכרן עם מסד הנתונים…" if meta else "מסתנכרן עם מסד הנתונים…")
 
 
-# Reconciliation (surviving_echoes / _effective_status / _effective_urgent
+# Reconciliation (surviving_echoes / _effective_status / _effective_urgency
 # below) only re-evaluates when this fragment executes. Without a poll, a
 # background write that resolves while the user isn't clicking anything else
 # in this board would sit at "מסתנכרן…" until some unrelated interaction
@@ -758,8 +830,10 @@ def _task_board_fragment(project_id: int | None, task_type: str):
         return
 
     comments_map = db.get_comments_map(project_id=project_id, task_type=task_type)
+    unread_map = db.get_task_comment_unread_counts(user, project_id=project_id, task_type=task_type)
+    _render_task_header()
     for task in visible_tasks:
-        _render_task(task, comments_map.get(task["id"], []))
+        _render_task(task, comments_map.get(task["id"], []), unread_map.get(task["id"], 0))
     for i, echo in enumerate(visible_pending):
         _render_pending_task(echo, i)
 
@@ -822,12 +896,9 @@ def _chat_bubble_html(sender: str, when: str, body: str, *, is_mine: bool) -> st
 
 
 def _on_chat_viewed(project_id: int, messages: list[dict]) -> None:
-    """Seam for the unread-badge feature (F3).
-
-    F3 will upsert chat_reads.last_read_at here, debounced so it writes only
-    when the project actually had unread messages — never on every poll tick.
-    Deliberately a no-op until then.
-    """
+    """Debounced read-receipt update for this project's chat — see
+    _mark_scope_viewed for the debounce mechanics and its one caveat."""
+    _mark_scope_viewed(db.SCOPE_PROJECT_CHAT, project_id, messages)
 
 
 def _watermarked_messages(project_id: int) -> list[dict]:
@@ -1007,7 +1078,17 @@ def render_project_dashboard(project: dict):
     # makes each project's tabs a distinct widget: switching projects mounts
     # a fresh instance, which starts on `default` regardless of what was
     # selected in the last one.
-    tab_labels = ["📋 אפיון המוצר", "✅ משימות פיתוח", "💬 תקשורת צוות"]
+    # Computed before st.tabs so the badge doesn't depend on which tab body
+    # actually executes: label content doesn't affect the widget's identity
+    # (that's `key=` below), so updating it on every render can't reset the
+    # tab selection back to `default`.
+    user = st.session_state["user"]
+    chat_unread = db.get_chat_unread_counts(user).get(project["id"], 0)
+    chat_label = "💬 תקשורת צוות"
+    if chat_unread > 0:
+        chat_label += f" **🔵 {chat_unread}**"
+
+    tab_labels = ["📋 אפיון המוצר", "✅ משימות פיתוח", chat_label]
     spec_tab, tasks_tab, chat_tab = st.tabs(
         tab_labels,
         key=f"project_tabs_{project['id']}",
@@ -1070,18 +1151,47 @@ def render_welcome():
 
     st.markdown('<div class="welcome-section-title">📁 הפרויקטים שלנו</div>', unsafe_allow_html=True)
 
-    # Each bubble is a full-size button styled as a floating card (see theme.py),
-    # so a click navigates straight into the project dashboard.
+    # One query each for every project's activity summary, instead of one
+    # query per project per bubble.
+    chat_unread = db.get_chat_unread_counts(user)
+    open_counts = db.get_open_task_counts()
+
+    def _activity_line(project_id: int) -> str:
+        unread = chat_unread.get(project_id, 0)
+        open_tasks = open_counts.get(project_id, 0)
+        if not unread and not open_tasks:
+            return ""
+        bits = []
+        if unread:
+            bits.append(f"💬 {unread} הודעות חדשות")
+        if open_tasks:
+            bits.append(f"📌 {open_tasks} משימות פתוחות")
+        return '<div class="project-activity-line">' + " | ".join(bits) + "</div>"
+
+    # Rich HTML content (title, creator line, grey activity summary, tag-style
+    # unread badge) can't live inside a single st.button — button labels only
+    # support a small markdown subset (bold/italic/links), no raw HTML/color.
+    # So each bubble is a keyed card with an HTML block on top and a slim
+    # full-width "open" button underneath, matching the same pattern used
+    # for the urgent-tasks widget below.
     bubbles = [
         {
-            "label": f"📂 **{p['name']}**\n\nנוצר על ידי {p['created_by']} · {fmt_ts(p['created_at'])}",
+            "html": (
+                f'<div class="project-bubble-title">📂 <strong>{html.escape(p["name"])}</strong></div>'
+                f'<div class="project-bubble-meta">נוצר על ידי {html.escape(p["created_by"] or "")} '
+                f'· {fmt_ts(p["created_at"])}</div>'
+                f'{_activity_line(p["id"])}'
+            ),
             "key": f"bubble_project_{p['id']}",
             "view": ("project", p["id"]),
         }
         for p in projects
     ] + [
         {
-            "label": f"🕓 **{e['name']}**\n\nנשמר כרגע במסד הנתונים…",
+            "html": (
+                f'<div class="project-bubble-title">🕓 <strong>{html.escape(e["name"])}</strong></div>'
+                '<div class="project-bubble-meta">נשמר כרגע במסד הנתונים…</div>'
+            ),
             "key": f"bubble_pending_{e['temp_id']}",
             "view": ("pending_project", e["temp_id"]),
         }
@@ -1095,9 +1205,13 @@ def render_welcome():
             columns = st.columns(per_row, gap="medium")
             for column, bubble in zip(columns, row):
                 with column:
-                    if st.button(bubble["label"], key=bubble["key"], use_container_width=True):
-                        st.session_state["view"] = bubble["view"]
-                        st.rerun()
+                    with st.container(key=f"card_{bubble['key']}"):
+                        st.markdown(bubble["html"], unsafe_allow_html=True)
+                        if st.button(
+                            "פתיחה ←", key=bubble["key"], use_container_width=True,
+                        ):
+                            st.session_state["view"] = bubble["view"]
+                            st.rerun()
 
     st.caption(
         "כל שינוי מתועד עם השם והשעה ומסונכרן לענן — לחצו 🔄 רענון כדי לשלוף עדכונים מהצוות."
@@ -1110,10 +1224,18 @@ def render_welcome():
 
 
 def _render_urgent_widget():
-    """Compact home-screen widget with every open urgent task across all projects."""
+    """Home-screen widget with every open urgent task across all projects,
+    styled to match the internal task cards: status, tags, due date and an
+    unread-comments badge — not just a bare title+source button label
+    (button labels can't carry colored pills/badges, only plain markdown)."""
     urgent_tasks = db.get_urgent_open_tasks()
     if not urgent_tasks:
         return
+
+    user = st.session_state["user"]
+    unread_map = db.get_unread_counts_for_tasks(
+        user, tuple(t["id"] for t in urgent_tasks)
+    )
 
     st.markdown(
         f'<div class="welcome-section-title">🔥 משימות דחופות ({len(urgent_tasks)})</div>',
@@ -1124,11 +1246,30 @@ def _render_urgent_widget():
             source = task["project_name"] or (
                 "משימות דחופות" if task["task_type"] == "urgent" else "רעיונות לעתיד"
             )
-            assignee = f" · 👤 {task['assignee']}" if task["assignee"] else ""
-            label = f"🔥 **{task['title']}**\n\n📂 {source}{assignee}"
-            if st.button(label, key=f"urgent_widget_{task['id']}", use_container_width=True):
-                if task["project_id"] is not None:
-                    st.session_state["view"] = ("project", task["project_id"])
-                else:
-                    st.session_state["view"] = task["task_type"]
-                st.rerun()
+            status = task.get("status") or db.STATUS_IN_PROGRESS
+            urgency = task.get("urgency") or db.URGENCY_HIGH
+            due = _fmt_date(task.get("due_date"))
+            badge = _unread_badge_html(unread_map.get(task["id"], 0))
+
+            meta_bits = [f"📂 {html.escape(source)}"]
+            if task["assignee"]:
+                meta_bits.append(f"👤 {html.escape(task['assignee'])}")
+            if due:
+                meta_bits.append(f"📅 {due}")
+
+            html_block = (
+                f'<div class="urgent-card-title">{_urgency_pill_html(urgency)} '
+                f'<span class="task-status-pill">{html.escape(status)}</span> '
+                f'{_tag_pills_html(task.get("tags"))} '
+                f'<strong>{html.escape(task["title"])}</strong>'
+                f"{(' ' + badge) if badge else ''}</div>"
+                f'<div class="urgent-card-meta">{" · ".join(meta_bits)}</div>'
+            )
+            with st.container(key=f"urgent_card_{task['id']}"):
+                st.markdown(html_block, unsafe_allow_html=True)
+                if st.button("פתיחה ←", key=f"urgent_widget_{task['id']}"):
+                    if task["project_id"] is not None:
+                        st.session_state["view"] = ("project", task["project_id"])
+                    else:
+                        st.session_state["view"] = task["task_type"]
+                    st.rerun()

@@ -125,7 +125,8 @@ def test_form_creates_a_fully_populated_task(pid):
         any("תיאור מפורט" in (c.value or "") for c in at.caption)
         or any("תיאור מפורט" in (m.value or "") for m in at.markdown)
     ), "Description not shown on the card"
-    assert any("31/12/2026" in (c.value or "") for c in at.caption), (
+    # Due date renders in its own column via st.markdown, not st.caption.
+    assert any("31/12/2026" in (m.value or "") for m in at.markdown), (
         "Due date not shown on the card"
     )
     print("PASS: tags, description and due date are all rendered on the card")
