@@ -80,6 +80,19 @@ def test_migration_is_idempotent_and_additive():
     print("PASS: schema migration is idempotent and additive")
 
 
+def test_add_task_form_is_collapsed_inside_an_expander(pid):
+    """The add-task form must be collapsed by default, inside a real
+    st.expander (not just visually hidden) — Expander.proto has no
+    at.expander(key=...) accessor in this Streamlit version (Expander only
+    stores the stripped-down Expandable submessage, which has no populated
+    id field), so this matches on the label instead."""
+    at = _open_project(pid)
+    matches = [e for e in at.expander if e.label == "➕ הוספת משימה חדשה"]
+    assert len(matches) == 1, f"expected exactly one add-task expander, found {len(matches)}"
+    assert matches[0].proto.expanded is False, "the add-task form must start collapsed"
+    print("PASS: the add-task form is wrapped in a collapsed-by-default expander")
+
+
 def test_form_creates_a_fully_populated_task(pid):
     from datetime import date
 
@@ -274,6 +287,7 @@ if __name__ == "__main__":
     test_migration_is_idempotent_and_additive()
     pid = db.add_project(TEMP_PROJECT, TEMP_ADMIN)
     try:
+        test_add_task_form_is_collapsed_inside_an_expander(pid)
         task = test_form_creates_a_fully_populated_task(pid)
         test_attachment_round_trips_and_download_button_renders(pid)
         test_form_upload_success_and_oversized_rejection(pid)

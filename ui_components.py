@@ -631,87 +631,92 @@ def _task_board_fragment(project_id: int | None, task_type: str):
     echo_key = f"optimistic_tasks_{scope}"
 
     # --- Add a task ---------------------------------------------------------
-    # Spacious, one field per row with the label above it, rather than the
-    # old compact single-row layout — this form now covers everything a task
-    # can carry (details, due date, tags, an attachment), not just a title.
-    with st.form(f"add_task_form_{scope}", clear_on_submit=True, border=False):
-        st.markdown("**כותרת המשימה**")
-        title = st.text_input(
-            "כותרת המשימה", placeholder="משימה חדשה...",
-            label_visibility="collapsed", key=f"task_title_{scope}",
-        )
-
-        st.markdown("**פירוט המשימה**")
-        description = st.text_area(
-            "פירוט המשימה", placeholder="תיאור מפורט של המשימה...", height=90,
-            label_visibility="collapsed", key=f"task_description_{scope}",
-        )
-
-        dev_col, due_col = st.columns(2)
-        with dev_col:
-            st.markdown("**מפתח**")
-            assignee = st.selectbox(
-                "מפתח", db.get_users(), label_visibility="collapsed",
-                key=f"task_assignee_{scope}",
-            )
-        with due_col:
-            st.markdown("**תאריך יעד**")
-            due_date = st.date_input(
-                "תאריך יעד", value=None, label_visibility="collapsed",
-                key=f"task_due_{scope}",
+    # Collapsed by default: the form covers everything a task can carry
+    # (details, due date, tags, an attachment) and got big enough that
+    # leaving it open by default ate too much screen space above the list.
+    with st.expander(
+        "➕ הוספת משימה חדשה", expanded=False, key=f"add_task_expander_{scope}"
+    ):
+        # Spacious, one field per row with the label above it, rather than the
+        # old compact single-row layout.
+        with st.form(f"add_task_form_{scope}", clear_on_submit=True, border=False):
+            st.markdown("**כותרת המשימה**")
+            title = st.text_input(
+                "כותרת המשימה", placeholder="משימה חדשה...",
+                label_visibility="collapsed", key=f"task_title_{scope}",
             )
 
-        st.markdown("**תגיות**")
-        tags = st.multiselect(
-            "תגיות", DEFAULT_TAGS, label_visibility="collapsed",
-            key=f"task_tags_{scope}",
-        )
+            st.markdown("**פירוט המשימה**")
+            description = st.text_area(
+                "פירוט המשימה", placeholder="תיאור מפורט של המשימה...", height=90,
+                label_visibility="collapsed", key=f"task_description_{scope}",
+            )
 
-        st.markdown("**קובץ מצורף**")
-        uploaded = st.file_uploader(
-            "קובץ מצורף", type=["png", "jpg", "jpeg", "pdf"],
-            label_visibility="collapsed", key=f"task_attachment_{scope}",
-        )
-
-        is_urgent = st.checkbox(
-            "🔥 דחוף", key=f"task_urgent_{scope}", help="סימון המשימה כדחופה"
-        )
-
-        submitted = st.form_submit_button(
-            "הוספה", use_container_width=True, key=f"add_task_submit_{scope}",
-        )
-        if submitted:
-            text = title.strip()
-            if not text:
-                st.warning("יש להזין כותרת למשימה.")
-            else:
-                attachment = None
-                if uploaded is not None:
-                    data = uploaded.getvalue()
-                    if len(data) > MAX_ATTACHMENT_BYTES:
-                        st.error(
-                            f"הקובץ '{uploaded.name}' גדול מ-"
-                            f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB ולא נשמר."
-                        )
-                    else:
-                        attachment = (uploaded.name, uploaded.type, data)
-                future = optimistic.submit_write(
-                    f"משימה '{text}'", db.add_task, text, assignee, user,
-                    project_id, task_type, is_urgent,
-                    description=description.strip(), due_date=due_date,
-                    tags=tags, attachment=attachment,
+            dev_col, due_col = st.columns(2)
+            with dev_col:
+                st.markdown("**מפתח**")
+                assignee = st.selectbox(
+                    "מפתח", db.get_users(), label_visibility="collapsed",
+                    key=f"task_assignee_{scope}",
                 )
-                st.session_state.setdefault(echo_key, []).append({
-                    "title": text, "assignee": assignee, "created_by": user,
-                    "is_urgent": is_urgent, "description": description.strip(),
-                    "due_date": due_date, "tags": tags, "future": future,
-                })
-                # Trigger 1: a new urgent task notifies its assignee.
-                if is_urgent and assignee:
-                    st.session_state["pending_toast"] = notifications.notify_urgent_assignment(
-                        assignee, text
+            with due_col:
+                st.markdown("**תאריך יעד**")
+                due_date = st.date_input(
+                    "תאריך יעד", value=None, label_visibility="collapsed",
+                    key=f"task_due_{scope}",
+                )
+
+            st.markdown("**תגיות**")
+            tags = st.multiselect(
+                "תגיות", DEFAULT_TAGS, label_visibility="collapsed",
+                key=f"task_tags_{scope}",
+            )
+
+            st.markdown("**קובץ מצורף**")
+            uploaded = st.file_uploader(
+                "קובץ מצורף", type=["png", "jpg", "jpeg", "pdf"],
+                label_visibility="collapsed", key=f"task_attachment_{scope}",
+            )
+
+            is_urgent = st.checkbox(
+                "🔥 דחוף", key=f"task_urgent_{scope}", help="סימון המשימה כדחופה"
+            )
+
+            submitted = st.form_submit_button(
+                "הוספה", use_container_width=True, key=f"add_task_submit_{scope}",
+            )
+            if submitted:
+                text = title.strip()
+                if not text:
+                    st.warning("יש להזין כותרת למשימה.")
+                else:
+                    attachment = None
+                    if uploaded is not None:
+                        data = uploaded.getvalue()
+                        if len(data) > MAX_ATTACHMENT_BYTES:
+                            st.error(
+                                f"הקובץ '{uploaded.name}' גדול מ-"
+                                f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB ולא נשמר."
+                            )
+                        else:
+                            attachment = (uploaded.name, uploaded.type, data)
+                    future = optimistic.submit_write(
+                        f"משימה '{text}'", db.add_task, text, assignee, user,
+                        project_id, task_type, is_urgent,
+                        description=description.strip(), due_date=due_date,
+                        tags=tags, attachment=attachment,
                     )
-                _rerun_scoped()
+                    st.session_state.setdefault(echo_key, []).append({
+                        "title": text, "assignee": assignee, "created_by": user,
+                        "is_urgent": is_urgent, "description": description.strip(),
+                        "due_date": due_date, "tags": tags, "future": future,
+                    })
+                    # Trigger 1: a new urgent task notifies its assignee.
+                    if is_urgent and assignee:
+                        st.session_state["pending_toast"] = notifications.notify_urgent_assignment(
+                            assignee, text
+                        )
+                    _rerun_scoped()
 
     # --- Task list -----------------------------------------------------------
     tasks = db.get_tasks(project_id=project_id, task_type=task_type)

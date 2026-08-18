@@ -409,6 +409,31 @@ a.task-mail:hover {
 
 /* Task board revamp: Apple-style task cards ------------------------------ */
 
+/* The "add task" form is collapsed by default (it grew too tall to leave
+   open) — styled like a premium button-card rather than a generic
+   expander: bigger radius matching the task cards below it, a visible
+   shadow, and a lift-on-hover so the collapsed header reads as clickable.
+   [data-testid="stExpander"] already strips the harsh default border and
+   neutralizes the form nested inside; this narrows to just this expander
+   and turns the shared look up a notch since it's the primary action on
+   the page, not an incidental detail like the per-task comments expander. */
+[class*="st-key-add_task_expander_"] {
+    border-radius: 24px !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.07) !important;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+[class*="st-key-add_task_expander_"]:has(summary:hover) {
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.10) !important;
+    transform: translateY(-1px);
+}
+[class*="st-key-add_task_expander_"] summary {
+    padding: 0.15rem 0;
+}
+[class*="st-key-add_task_expander_"] summary p {
+    font-weight: 700;
+    font-size: 1.02rem;
+}
+
 /* Each task card: white surface, generous radius, soft shadow — matching
    every other card in the app (sidebar, project bubbles, urgent widget). */
 [class*="st-key-task_card_"] {
