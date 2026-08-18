@@ -193,7 +193,7 @@ def test_urgent_assignment_trigger(pid, monkeypatched_spy):
     at.text_input(key=f"task_title_{scope}").set_value(title)
     at.checkbox(key=f"task_urgent_{scope}").set_value(True)
     at.selectbox(key=f"task_assignee_{scope}").select(OTHER_USER)
-    submit = next(b for b in at.button if b.key and f"add_task_form_{scope}" in b.key)
+    submit = next(b for b in at.button if b.key == f"add_task_submit_{scope}")
     at = submit.set_value(True).run()
     assert not at.exception, f"Submit crashed: {at.exception[0]}"
 
@@ -213,7 +213,7 @@ def test_regular_task_sends_nothing(pid, spy):
     at = _open_project(pid)
     scope = f"project_{pid}"
     at.text_input(key=f"task_title_{scope}").set_value("משימה רגילה ללא התראה")
-    submit = next(b for b in at.button if b.key and f"add_task_form_{scope}" in b.key)
+    submit = next(b for b in at.button if b.key == f"add_task_submit_{scope}")
     at = submit.set_value(True).run()
     at = _wait_for_sync(at)
     assert len(spy.calls) == before, f"Regular task should not notify: {spy.calls[before:]}"
@@ -228,9 +228,10 @@ def test_completion_trigger(pid, spy):
 
     at = _open_project(pid)
     before = len(spy.calls)
-    at.checkbox(key=f"task_done_{task['id']}").set_value(True)
-    at = at.run()
-    assert not at.exception, f"Toggle crashed: {at.exception[0]}"
+    status_key = f"task_status_{task['id']}"
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    at = dropdown.set_value(db.STATUS_DONE).run()
+    assert not at.exception, f"Status change crashed: {at.exception[0]}"
 
     assert spy.wait(before + 1), "No notification was sent on completion"
     recipient, message = spy.calls[-1]
@@ -244,15 +245,15 @@ def test_completion_trigger(pid, spy):
     print("PASS: trigger 2 — completion notifies the creator with the exact Hebrew message")
     print("PASS: UI queues a Hebrew toast for the notification")
 
-    # Un-completing must not notify anyone. A completed task shows the green
-    # "✅ הושלם" button instead of a checkbox, so click that to reopen it.
+    # Un-completing must not notify anyone. The status dropdown (not a
+    # checkbox/pill anymore) moves the task back to open.
     at = _wait_for_sync(at)
     before = len(spy.calls)
-    undone = next(b for b in at.button if b.key == f"task_undone_{task['id']}")
-    at = undone.set_value(True).run()
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    at = dropdown.set_value(db.STATUS_IN_PROGRESS).run()
     at = _wait_for_sync(at)
     assert len(spy.calls) == before, f"Un-completing should not notify: {spy.calls[before:]}"
-    print("PASS: un-checking a completed task sends no notification")
+    print("PASS: reopening a completed task sends no notification")
 
 
 def test_self_completion_sends_nothing(pid, spy):
@@ -261,8 +262,9 @@ def test_self_completion_sends_nothing(pid, spy):
     task = next(t for t in db.get_tasks(project_id=pid) if t["title"] == "משימה שלי")
     at = _open_project(pid)
     before = len(spy.calls)
-    at.checkbox(key=f"task_done_{task['id']}").set_value(True)
-    at = at.run()
+    status_key = f"task_status_{task['id']}"
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    at = dropdown.set_value(db.STATUS_DONE).run()
     at = _wait_for_sync(at)
     assert len(spy.calls) == before, f"Self-completion should not notify: {spy.calls[before:]}"
     print("PASS: completing your own task sends no notification (NOTIFY_SELF=False)")

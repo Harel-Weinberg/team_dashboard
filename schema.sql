@@ -71,14 +71,31 @@ CREATE TABLE IF NOT EXISTS chat_reads (
 ALTER TABLE project_chat ADD COLUMN IF NOT EXISTS client_msg_id TEXT;
 
 -- --------------------------------------------------------------------------
--- Forward-compatibility columns for the planned kanban board (additive only —
--- is_done remains the source of truth; no code reads these yet).
+-- Task board revamp: status is now a real 3-state field (בתהליך / בבירור /
+-- בוצע), replacing the boolean checkbox in the UI. is_done stays in sync
+-- (is_done = status = 'בוצע') so notifications/urgent-widget/mailto — all
+-- keyed on is_done — needed no changes. Each UPDATE only touches rows still
+-- holding an older value, so this whole block is idempotent.
 -- --------------------------------------------------------------------------
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status TEXT;
 UPDATE tasks SET status = CASE WHEN is_done THEN 'done' ELSE 'todo' END
  WHERE status IS NULL;
-ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'todo';
+UPDATE tasks SET status = 'בתהליך' WHERE status = 'todo';
+UPDATE tasks SET status = 'בוצע'   WHERE status = 'done';
+UPDATE tasks SET status = 'בתהליך' WHERE status = 'in_progress';
+UPDATE tasks SET status = 'בבירור' WHERE status = 'review';
+ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'בתהליך';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date DATE;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
+
+-- Attachments are stored as bytes in Postgres, not Supabase Storage — no
+-- Storage bucket/policy/client is configured for this app, and task
+-- attachments here are a handful of small PDFs/screenshots. Size is capped
+-- client-side (see ui_components.MAX_ATTACHMENT_BYTES) before any write.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_name TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_type TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_data BYTEA;
 
 -- --------------------------------------------------------------------------
 -- Indexes
@@ -87,6 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_project_time
     ON project_chat (project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
 CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_task_status   ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
     ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;

@@ -220,30 +220,32 @@ def _render_spec(project_id: int):
 # ---------------------------------------------------------------------------
 
 
-def _set_task_done(task: dict, new_value: bool):
-    """Optimistically set a task's completion status and sync in the background.
+def _set_task_status(task: dict, new_status: str):
+    """Optimistically switch a task's status and sync in the background.
 
     Trigger 2: on an open -> completed transition, notify the task's creator.
+    Same edge as before ('בוצע' is the only status that maps to is_done).
     """
     user = st.session_state["user"]
     future = optimistic.submit_write(
-        "סטטוס משימה", db.set_task_done, task["id"], new_value, user
+        "סטטוס משימה", db.set_task_status, task["id"], new_status, user
     )
-    st.session_state.setdefault("task_done_override", {})[task["id"]] = {
-        "value": new_value,
+    st.session_state.setdefault("task_status_override", {})[task["id"]] = {
+        "value": new_status,
         "future": future,
     }
 
-    if new_value and not task["is_done"]:  # only on the open -> completed edge
+    was_done = task.get("status") == db.STATUS_DONE
+    if new_status == db.STATUS_DONE and not was_done:
         toast = notifications.notify_task_completed(task["created_by"], task["title"], user)
         if toast:
             # Shown on the rerun that follows this callback (see main.py).
             st.session_state["pending_toast"] = toast
 
 
-def _toggle_task(task_id: int, widget_key: str, task: dict):
-    """on_change handler for the 'בוצע' checkbox of an open task."""
-    _set_task_done(task, bool(st.session_state[widget_key]))
+def _on_status_change(widget_key: str, task: dict):
+    """on_change handler for a task's status selectbox."""
+    _set_task_status(task, st.session_state[widget_key])
 
 
 def _set_task_urgent(task: dict, new_value: bool):
@@ -270,19 +272,19 @@ def _effective_urgent(task: dict) -> bool:
     return override["value"] if override else bool(task.get("is_urgent"))
 
 
-def _effective_done(task: dict) -> tuple[bool, bool]:
-    """Return (done-status to display, whether an optimistic override is in flight)."""
-    overrides = st.session_state.setdefault("task_done_override", {})
+def _effective_status(task: dict) -> tuple[str, bool]:
+    """Return (status to display, whether an optimistic override is in flight)."""
+    overrides = st.session_state.setdefault("task_status_override", {})
     override = overrides.get(task["id"])
     if override is not None:
         future = override["future"]
-        landed = bool(task["is_done"]) == override["value"]
+        landed = task.get("status") == override["value"]
         if future.done() and (future.exception() is not None or landed):
             overrides.pop(task["id"])  # failed (revert to DB truth) or confirmed
             override = None
     if override is not None:
         return override["value"], True
-    return bool(task["is_done"]), False
+    return task.get("status") or db.STATUS_IN_PROGRESS, False
 
 
 def _mail_icon_html(mailto: str | None, is_done: bool) -> str:
@@ -301,173 +303,242 @@ def _mail_icon_html(mailto: str | None, is_done: bool) -> str:
     )
 
 
+# Fixed tag vocabulary (not free text) so every tag can get a deterministic
+# color — the pills are meant to read at a glance, which a per-user palette
+# of arbitrary strings couldn't guarantee.
+DEFAULT_TAGS = ["Front-End", "Back-End", "Bug", "Feature"]
+TAG_CSS_CLASS = {
+    "Front-End": "tag-frontend",
+    "Back-End": "tag-backend",
+    "Bug": "tag-bug",
+    "Feature": "tag-feature",
+}
+
+# Attachments are stored as bytes in Postgres (see database.py) — capped here
+# so a large upload can't bloat the primary OLTP database or the connection
+# pool. Generous enough for a screenshot or a short PDF, nothing more.
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+
+def _tag_pills_html(tags: list[str] | None) -> str:
+    if not tags:
+        return ""
+    return "".join(
+        f'<span class="task-tag {TAG_CSS_CLASS.get(tag, "tag-default")}">'
+        f"{html.escape(tag)}</span>"
+        for tag in tags
+    )
+
+
+def _fmt_date(value) -> str:
+    if not value:
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%d/%m/%Y")
+    return str(value)  # defensive: an ISO string that _revive() didn't reach
+
+
 def _task_title_html(
     title: str,
-    assignee: str | None,
     is_done: bool,
     is_urgent: bool = False,
+    tags: list[str] | None = None,
     mailto: str | None = None,
 ) -> str:
-    """Task title: urgent tag first, bold when open, struck through + dimmed when done."""
+    """Task title: urgent tag, then tag pills, then bold/struck-through title."""
     safe_title = html.escape(title)
     parts = []
     if is_urgent:
         parts.append('<span class="task-urgent">🔥 דחוף</span>')
+    tag_html = _tag_pills_html(tags)
+    if tag_html:
+        parts.append(tag_html)
     parts.append(f"<s>{safe_title}</s>" if is_done else f"<strong>{safe_title}</strong>")
-    if assignee:
-        parts.append(f"· 👤 <code>{html.escape(assignee)}</code>")
     body = " ".join(parts)
-    # When completed, dim the whole line (tag and assignee included) — but keep
-    # the mail link outside the dimmed wrapper so it stays clearly clickable.
+    # When completed, dim the whole line (tags included) — but keep the mail
+    # link outside the dimmed wrapper so it stays clearly clickable.
     if is_done:
         body = f'<span class="task-done">{body}</span>'
     return body + _mail_icon_html(mailto, is_done)
 
 
+def _task_meta_line(task_or_echo: dict) -> str:
+    """👤 assignee · 📅 due date — both optional, shown before the created/synced line."""
+    parts = []
+    assignee = task_or_echo.get("assignee")
+    if assignee:
+        parts.append(f"👤 {html.escape(assignee)}")
+    due = _fmt_date(task_or_echo.get("due_date"))
+    if due:
+        parts.append(f"📅 {due}")
+    return " · ".join(parts)
+
+
 def _render_task(task: dict, comments: list[dict]):
+    """An Apple-style card: status dropdown, urgency toggle, title/tags,
+    description, assignee/due date, attachment, mailto, and a bubble-styled
+    comment thread — all in one keyed container (also what lets theme.py
+    give it rounded corners and a shadow, and what a still-in-flight status
+    change would mute if that mattered here — it doesn't: unlike chat, a
+    task-status change has no "failed, please retry" UI, matching the
+    pre-existing philosophy for every other task write in this file, so
+    there's no separate muted/failed visual state to drive from the Future).
+    """
     user = st.session_state["user"]
-    done_key = f"task_done_{task['id']}"
-    is_done, syncing = _effective_done(task)
+    status, syncing = _effective_status(task)
+    is_done = status == db.STATUS_DONE
+    is_urgent = _effective_urgent(task)
+    status_key = f"task_status_{task['id']}"
 
     # If another user changed the task in the DB, let the DB value win.
-    if done_key in st.session_state and bool(st.session_state[done_key]) != is_done:
-        del st.session_state[done_key]
+    if status_key in st.session_state and st.session_state[status_key] != status:
+        del st.session_state[status_key]
 
-    is_urgent = _effective_urgent(task)
-
-    # Top-aligned so the status/urgency controls line up with the task title
-    # rather than being centred against the title + metadata block.
-    status_col, urgent_col, body_col = st.columns([0.12, 0.10, 0.78], vertical_alignment="top")
-    with status_col:
-        if is_done:
-            # A prominent green "completed" pill that also un-completes on click,
-            # so the action stays reversible without a second control.
-            if st.button(
-                "✅ הושלם",
-                key=f"task_undone_{task['id']}",
-                help="לחצו לביטול סימון הביצוע",
-            ):
-                _set_task_done(task, False)
-                st.rerun()
-        else:
-            st.checkbox(
-                "בוצע",
-                value=is_done,
-                key=done_key,
-                label_visibility="collapsed",
-                on_change=_toggle_task,
-                args=(task["id"], done_key, task),
-                help="סימון המשימה כבוצעה",
+    with st.container(key=f"task_card_{task['id']}"):
+        # Top-aligned so the status/urgency controls line up with the task
+        # title rather than being centred against the title + metadata block.
+        status_col, urgent_col, body_col = st.columns(
+            [0.20, 0.10, 0.70], vertical_alignment="top"
+        )
+        with status_col:
+            st.selectbox(
+                "סטטוס", db.TASK_STATUSES,
+                index=db.TASK_STATUSES.index(status),
+                key=status_key, label_visibility="collapsed",
+                # No manual rerun here — Streamlit already reruns the enclosing
+                # fragment once after an on_change callback returns (the exact
+                # idiom the urgency toggle below and the checkbox it replaced
+                # both relied on); calling _rerun_scoped() too would just be a
+                # second, redundant rerun, not a loop, but there's no reason
+                # to pay for it.
+                on_change=_on_status_change, args=(status_key, task),
+                help="שינוי סטטוס המשימה",
             )
-    with urgent_col:
-        # Interactive urgency toggle. Two distinct keys (on/off) so each state
-        # can be styled independently in theme.py.
-        if is_urgent:
-            if st.button(
-                "🔥 דחוף",
-                key=f"task_urgent_on_{task['id']}",
-                help="לחצו כדי לבטל את סימון הדחיפות",
+        with urgent_col:
+            # Interactive urgency toggle. Two distinct keys (on/off) so each
+            # state can be styled independently in theme.py.
+            if is_urgent:
+                if st.button(
+                    "🔥 דחוף",
+                    key=f"task_urgent_on_{task['id']}",
+                    help="לחצו כדי לבטל את סימון הדחיפות",
+                ):
+                    _set_task_urgent(task, False)
+                    st.rerun()
+            elif st.button(
+                "🔥",
+                key=f"task_urgent_off_{task['id']}",
+                help="לחצו כדי לסמן את המשימה כדחופה",
             ):
-                _set_task_urgent(task, False)
+                _set_task_urgent(task, True)
                 st.rerun()
-        elif st.button(
-            "🔥",
-            key=f"task_urgent_off_{task['id']}",
-            help="לחצו כדי לסמן את המשימה כדחופה",
-        ):
-            _set_task_urgent(task, True)
-            st.rerun()
-    with body_col:
-        st.markdown(
-            _task_title_html(
-                task["title"], task["assignee"], is_done,
-                mailto=notifications.build_mailto_link(task, is_done=is_done),
-            ),
-            unsafe_allow_html=True,
-        )
+        with body_col:
+            st.markdown(
+                _task_title_html(
+                    task["title"], is_done, is_urgent, task.get("tags"),
+                    mailto=notifications.build_mailto_link(task, is_done=is_done),
+                ),
+                unsafe_allow_html=True,
+            )
+            if task.get("description"):
+                st.caption(task["description"])
 
-        meta = f"נוצר על ידי {task['created_by']} · {fmt_ts(task['created_at'])}"
-        if syncing:
-            meta += " · 🕓 מסתנכרן…"
-        elif is_done and task["completed_by"]:
-            meta += f" · ✅ בוצע על ידי {task['completed_by']} ב-{fmt_ts(task['completed_at'])}"
-        st.caption(meta)
+            meta = _task_meta_line(task)
+            created = f"נוצר על ידי {task['created_by']} · {fmt_ts(task['created_at'])}"
+            meta = f"{meta} · {created}" if meta else created
+            if syncing:
+                meta += " · 🕓 מסתנכרן…"
+            elif is_done and task["completed_by"]:
+                meta += f" · ✅ בוצע על ידי {task['completed_by']} ב-{fmt_ts(task['completed_at'])}"
+            st.caption(meta)
 
-        comment_echoes = st.session_state.setdefault("optimistic_comments", {})
-        pending_comments = optimistic.surviving_echoes(
-            comment_echoes.get(task["id"], []),
-            landed=lambda e: any(
-                c["author"] == e["author"] and c["content"] == e["content"] for c in comments
-            ),
-        )
-        comment_echoes[task["id"]] = pending_comments
+            if task.get("attachment_name"):
+                fetched = db.get_task_attachment(task["id"])
+                if fetched:
+                    name, mime, data = fetched
+                    st.download_button(
+                        "📎 הורדת קובץ מצורף", data=data, file_name=name,
+                        mime=mime or "application/octet-stream",
+                        key=f"task_attachment_dl_{task['id']}",
+                    )
 
-        with st.expander(f"💬 הערות ({len(comments) + len(pending_comments)})"):
-            # dir="rtl" keeps the avatar emoji on the right even when the
-            # author's name is Latin (which would otherwise flip the line LTR).
-            for comment in comments:
-                avatar = AVATARS.get(comment["author"], DEFAULT_AVATAR)
-                st.markdown(
-                    f'<span dir="rtl">{avatar} '
-                    f"<strong>{html.escape(comment['author'] or '')}</strong> · "
-                    f"<small>{fmt_ts(comment['created_at'])}</small></span>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(comment["content"])
-                st.markdown("---")
-            for echo in pending_comments:
-                avatar = AVATARS.get(echo["author"], DEFAULT_AVATAR)
-                st.markdown(
-                    f'<span dir="rtl">{avatar} '
-                    f"<strong>{html.escape(echo['author'])}</strong> · "
-                    "<small>🕓 נשלח…</small></span>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(echo["content"])
-                st.markdown("---")
+            comment_echoes = st.session_state.setdefault("optimistic_comments", {})
+            pending_comments = optimistic.surviving_echoes(
+                comment_echoes.get(task["id"], []),
+                landed=lambda e: any(
+                    c["author"] == e["author"] and c["content"] == e["content"] for c in comments
+                ),
+            )
+            comment_echoes[task["id"]] = pending_comments
 
-            with st.form(f"comment_form_{task['id']}", clear_on_submit=True, border=False):
-                note = st.text_area(
-                    "הוספת הערה למשימה",
-                    height=80,
-                    placeholder="כתבו הערה על המשימה הזו...",
-                    key=f"comment_text_{task['id']}",
-                    label_visibility="collapsed",
-                )
-                if st.form_submit_button("💬 שמירת הערה"):
-                    text = note.strip()
-                    if text:
-                        future = optimistic.submit_write(
-                            "הערה למשימה", db.add_comment, task["id"], text, user
+            with st.expander(f"💬 הערות ({len(comments) + len(pending_comments)})"):
+                # The exact same bubble markup as the project chat tab —
+                # rendered per-comment (not batched) since this list is short
+                # and some rows need their own muted-while-pending container.
+                for comment in comments:
+                    st.markdown(
+                        _chat_bubble_html(
+                            comment["author"], fmt_ts(comment["created_at"]),
+                            comment["content"], is_mine=comment["author"] == user,
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                for i, echo in enumerate(pending_comments):
+                    with st.container(key=f"taskcommentpend_{task['id']}_{i}"):
+                        st.markdown(
+                            _chat_bubble_html(
+                                echo["author"], "שולח…", echo["content"], is_mine=True,
+                            ),
+                            unsafe_allow_html=True,
                         )
-                        comment_echoes.setdefault(task["id"], []).append(
-                            {"author": user, "content": text, "future": future}
-                        )
-                        _rerun_scoped()
 
-            # Deleting stays synchronous on purpose: destructive actions should
-            # confirm against the DB before the row disappears from the UI.
-            if st.button("🗑️ מחיקת המשימה", key=f"task_delete_{task['id']}"):
-                db.delete_task(task["id"])
-                st.rerun()
+                with st.form(f"comment_form_{task['id']}", clear_on_submit=True, border=False):
+                    note = st.text_area(
+                        "הוספת הערה למשימה",
+                        height=80,
+                        placeholder="כתבו הערה על המשימה הזו...",
+                        key=f"comment_text_{task['id']}",
+                        label_visibility="collapsed",
+                    )
+                    if st.form_submit_button("💬 שמירת הערה"):
+                        text = note.strip()
+                        if text:
+                            future = optimistic.submit_write(
+                                "הערה למשימה", db.add_comment, task["id"], text, user
+                            )
+                            comment_echoes.setdefault(task["id"], []).append(
+                                {"author": user, "content": text, "future": future}
+                            )
+                            _rerun_scoped()
+
+                # Deleting stays synchronous on purpose: destructive actions
+                # should confirm against the DB before the row disappears.
+                if st.button("🗑️ מחיקת המשימה", key=f"task_delete_{task['id']}"):
+                    db.delete_task(task["id"])
+                    st.rerun()
 
 
-def _render_pending_task(echo: dict):
-    # No interactive controls yet — the row has no database id until it syncs.
-    status_col, body_col = st.columns([0.22, 0.78], vertical_alignment="center")
-    status_col.markdown("🕓")
-    with body_col:
-        st.markdown(
-            _task_title_html(
-                echo["title"], echo["assignee"], is_done=False,
-                is_urgent=echo.get("is_urgent", False),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.caption("מסתנכרן עם מסד הנתונים…")
+def _render_pending_task(echo: dict, index: int):
+    # No interactive controls yet — the row has no database id until it syncs,
+    # so the container key is just this render's position in the pending list.
+    with st.container(key=f"task_card_pending_{index}"):
+        status_col, body_col = st.columns([0.22, 0.78], vertical_alignment="center")
+        status_col.markdown("🕓")
+        with body_col:
+            st.markdown(
+                _task_title_html(
+                    echo["title"], is_done=False,
+                    is_urgent=echo.get("is_urgent", False), tags=echo.get("tags"),
+                ),
+                unsafe_allow_html=True,
+            )
+            if echo.get("description"):
+                st.caption(echo["description"])
+            meta = _task_meta_line(echo)
+            st.caption(f"{meta} · מסתנכרן עם מסד הנתונים…" if meta else "מסתנכרן עם מסד הנתונים…")
 
 
-# Reconciliation (surviving_echoes / _effective_done / _effective_urgent
+# Reconciliation (surviving_echoes / _effective_status / _effective_urgent
 # below) only re-evaluates when this fragment executes. Without a poll, a
 # background write that resolves while the user isn't clicking anything else
 # in this board would sit at "מסתנכרן…" until some unrelated interaction
@@ -475,6 +546,51 @@ def _render_pending_task(echo: dict):
 # pending — get_tasks()/get_comments_map() are cache hits for 30s
 # (VOLATILE_TTL) at a time, so most of these ticks touch no database at all.
 TASK_BOARD_POLL = "1s"
+
+
+def _task_matches_filters(
+    item: dict, query: str, only_mine: bool, user: str, selected_statuses: list[str],
+) -> bool:
+    """Shared predicate for both landed tasks and pending echoes — both
+    support the same .get() surface (title/description/assignee/status)."""
+    if query:
+        q = query.strip().lower()
+        haystack = f"{item.get('title') or ''} {item.get('description') or ''}".lower()
+        if q not in haystack:
+            return False
+    if only_mine and item.get("assignee") != user:
+        return False
+    # Pending echoes have no `status` yet — a task always starts "in progress".
+    if (item.get("status") or db.STATUS_IN_PROGRESS) not in selected_statuses:
+        return False
+    return True
+
+
+def _render_task_filters(scope: str, user: str) -> tuple[str, bool, list[str], bool]:
+    """The search/filter bar above the task list. Returns the current filter
+    state; _task_board_fragment applies it to both tasks and pending echoes.
+    """
+    search_col, mine_col = st.columns([0.7, 0.3], vertical_alignment="center")
+    with search_col:
+        query = st.text_input(
+            "חיפוש משימות", placeholder="🔍 חיפוש לפי כותרת או תיאור...",
+            label_visibility="collapsed", key=f"task_search_{scope}",
+        )
+    with mine_col:
+        only_mine = st.toggle("המשימות שלי", key=f"task_mine_{scope}")
+
+    status_col, sort_col = st.columns([0.75, 0.25], vertical_alignment="center")
+    with status_col:
+        selected_statuses = st.multiselect(
+            "סינון לפי סטטוס", db.TASK_STATUSES, default=list(db.TASK_STATUSES),
+            label_visibility="collapsed", key=f"task_status_filter_{scope}",
+        )
+    with sort_col:
+        sort_by_due = st.checkbox(
+            "📅 מיון לפי תאריך יעד", key=f"task_sort_due_{scope}",
+            help="מיון המשימות המוצגות לפי התאריך הקרוב ביותר",
+        )
+    return query, only_mine, selected_statuses, sort_by_due
 
 
 def render_task_board(project_id: int | None = None, task_type: str = "project"):
@@ -494,7 +610,7 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
 def _task_board_fragment(project_id: int | None, task_type: str):
     # A fragment-scoped rerun never re-enters main(), so drain here too:
     #
-    # add_task/set_task_done/set_task_urgent/add_comment run on a background
+    # add_task/set_task_status/set_task_urgent/add_comment run on a background
     # worker thread. Per the E6 thread-discipline rule, a worker can't call
     # st.cache_data.clear() itself — db._invalidate() queues the clear instead
     # and only main() used to drain it. Without this line, the poll below
@@ -514,35 +630,82 @@ def _task_board_fragment(project_id: int | None, task_type: str):
     scope = f"{task_type}_{project_id if project_id is not None else 'global'}"
     echo_key = f"optimistic_tasks_{scope}"
 
-    # --- Add a task --------------------------------------------------------
+    # --- Add a task ---------------------------------------------------------
+    # Spacious, one field per row with the label above it, rather than the
+    # old compact single-row layout — this form now covers everything a task
+    # can carry (details, due date, tags, an attachment), not just a title.
     with st.form(f"add_task_form_{scope}", clear_on_submit=True, border=False):
-        title_col, assignee_col, urgent_col, button_col = st.columns(
-            [0.47, 0.21, 0.14, 0.18], vertical_alignment="center"
+        st.markdown("**כותרת המשימה**")
+        title = st.text_input(
+            "כותרת המשימה", placeholder="משימה חדשה...",
+            label_visibility="collapsed", key=f"task_title_{scope}",
         )
-        title = title_col.text_input(
-            "משימה", placeholder="משימה חדשה...", label_visibility="collapsed",
-            key=f"task_title_{scope}",
+
+        st.markdown("**פירוט המשימה**")
+        description = st.text_area(
+            "פירוט המשימה", placeholder="תיאור מפורט של המשימה...", height=90,
+            label_visibility="collapsed", key=f"task_description_{scope}",
         )
-        assignee = assignee_col.selectbox(
-            "אחראי/ת", db.get_users(), label_visibility="collapsed",
-            key=f"task_assignee_{scope}",
+
+        dev_col, due_col = st.columns(2)
+        with dev_col:
+            st.markdown("**מפתח**")
+            assignee = st.selectbox(
+                "מפתח", db.get_users(), label_visibility="collapsed",
+                key=f"task_assignee_{scope}",
+            )
+        with due_col:
+            st.markdown("**תאריך יעד**")
+            due_date = st.date_input(
+                "תאריך יעד", value=None, label_visibility="collapsed",
+                key=f"task_due_{scope}",
+            )
+
+        st.markdown("**תגיות**")
+        tags = st.multiselect(
+            "תגיות", DEFAULT_TAGS, label_visibility="collapsed",
+            key=f"task_tags_{scope}",
         )
-        is_urgent = urgent_col.checkbox(
+
+        st.markdown("**קובץ מצורף**")
+        uploaded = st.file_uploader(
+            "קובץ מצורף", type=["png", "jpg", "jpeg", "pdf"],
+            label_visibility="collapsed", key=f"task_attachment_{scope}",
+        )
+
+        is_urgent = st.checkbox(
             "🔥 דחוף", key=f"task_urgent_{scope}", help="סימון המשימה כדחופה"
         )
-        if button_col.form_submit_button("➕ הוספה", use_container_width=True):
+
+        submitted = st.form_submit_button(
+            "הוספה", use_container_width=True, key=f"add_task_submit_{scope}",
+        )
+        if submitted:
             text = title.strip()
-            if text:
+            if not text:
+                st.warning("יש להזין כותרת למשימה.")
+            else:
+                attachment = None
+                if uploaded is not None:
+                    data = uploaded.getvalue()
+                    if len(data) > MAX_ATTACHMENT_BYTES:
+                        st.error(
+                            f"הקובץ '{uploaded.name}' גדול מ-"
+                            f"{MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB ולא נשמר."
+                        )
+                    else:
+                        attachment = (uploaded.name, uploaded.type, data)
                 future = optimistic.submit_write(
                     f"משימה '{text}'", db.add_task, text, assignee, user,
                     project_id, task_type, is_urgent,
+                    description=description.strip(), due_date=due_date,
+                    tags=tags, attachment=attachment,
                 )
-                st.session_state.setdefault(echo_key, []).append(
-                    {
-                        "title": text, "assignee": assignee, "created_by": user,
-                        "is_urgent": is_urgent, "future": future,
-                    }
-                )
+                st.session_state.setdefault(echo_key, []).append({
+                    "title": text, "assignee": assignee, "created_by": user,
+                    "is_urgent": is_urgent, "description": description.strip(),
+                    "due_date": due_date, "tags": tags, "future": future,
+                })
                 # Trigger 1: a new urgent task notifies its assignee.
                 if is_urgent and assignee:
                     st.session_state["pending_toast"] = notifications.notify_urgent_assignment(
@@ -564,14 +727,36 @@ def _task_board_fragment(project_id: int | None, task_type: str):
         st.info("אין משימות עדיין — הוסיפו את הראשונה למעלה.")
         return
 
+    query, only_mine, selected_statuses, sort_by_due = _render_task_filters(scope, user)
+
+    def matches(item):
+        return _task_matches_filters(item, query, only_mine, user, selected_statuses)
+
+    visible_tasks = [t for t in tasks if matches(t)]
+    visible_pending = [e for e in pending_tasks if matches(e)]
+    if sort_by_due:
+        # NULLs (no due date) sort last regardless of direction.
+        visible_tasks = sorted(
+            visible_tasks, key=lambda t: (t.get("due_date") is None, t.get("due_date"))
+        )
+
     open_count = len([t for t in tasks if not t["is_done"]]) + len(pending_tasks)
     total_count = len(tasks) + len(pending_tasks)
-    st.caption(f'{open_count} פתוחות · {total_count} סה"כ')
+    visible_count = len(visible_tasks) + len(visible_pending)
+    caption = f'{open_count} פתוחות · {total_count} סה"כ'
+    if visible_count != total_count:
+        caption += f" · מוצגות {visible_count}"
+    st.caption(caption)
+
+    if not visible_tasks and not visible_pending:
+        st.caption("אין משימות התואמות את הסינון הנוכחי.")
+        return
+
     comments_map = db.get_comments_map(project_id=project_id, task_type=task_type)
-    for task in tasks:
+    for task in visible_tasks:
         _render_task(task, comments_map.get(task["id"], []))
-    for echo in pending_tasks:
-        _render_pending_task(echo)
+    for i, echo in enumerate(visible_pending):
+        _render_pending_task(echo, i)
 
 
 # ---------------------------------------------------------------------------

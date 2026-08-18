@@ -94,7 +94,7 @@ def test_form_creates_urgent_task(pid):
     title = f"דחוף מהטופס {int(time.time())}"
     at.text_input(key=f"task_title_{scope}").set_value(title)
     at.checkbox(key=f"task_urgent_{scope}").set_value(True)
-    submit = next(b for b in at.button if b.key and f"add_task_form_{scope}" in b.key)
+    submit = next(b for b in at.button if b.key == f"add_task_submit_{scope}")
     at = submit.set_value(True).run()
     assert not at.exception, f"Submit crashed: {at.exception[0]}"
 
@@ -123,7 +123,8 @@ def test_completed_urgent_is_dimmed(at, row):
     assert "task-done" in block and "<s>" in block, f"Completed task not struck/dimmed: {block}"
     keys = [b.key for b in at.button if b.key]
     assert f"task_urgent_on_{row['id']}" in keys, "Urgency toggle should survive completion"
-    assert f"task_undone_{row['id']}" in keys, "Completed task should show the green הושלם pill"
+    status = next(s for s in at.selectbox if s.key == f"task_status_{row['id']}")
+    assert status.value == db.STATUS_DONE, f"Status dropdown should show {db.STATUS_DONE!r}"
     print("PASS: completed urgent task is struck through, dimmed, and keeps both controls")
 
 
@@ -167,49 +168,65 @@ def test_ui_urgency_toggle(pid):
     return at, task
 
 
-def test_ui_uncomplete_pill(pid, task):
-    """The green הושלם pill reverts a completed task to open."""
+def test_ui_status_dropdown_round_trip(pid, task):
+    """The status dropdown reversibly moves a task between open and done."""
     at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
     at.session_state["view"] = ("project", pid)
     at = at.run()
 
-    at.checkbox(key=f"task_done_{task['id']}").set_value(True)
-    at = at.run()
-    assert any(b.key == f"task_undone_{task['id']}" for b in at.button), (
-        "Completed task should show the green הושלם pill instead of a checkbox"
-    )
-    assert not any(c.key == f"task_done_{task['id']}" for c in at.checkbox), (
-        "The checkbox should be replaced once the task is completed"
-    )
-    print("PASS: completing a task replaces the checkbox with the ✅ הושלם pill")
+    status_key = f"task_status_{task['id']}"
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    assert dropdown.value == db.STATUS_IN_PROGRESS, f"Expected an open task, got {dropdown.value!r}"
+
+    at = dropdown.set_value(db.STATUS_DONE).run()
+    assert not at.exception, f"Status change crashed: {at.exception[0]}"
+    # Optimistic: the new value shows before the DB write is confirmed.
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    assert dropdown.value == db.STATUS_DONE, "Status should flip instantly (optimistic)"
+    print("PASS: selecting בוצע marks the task done instantly (optimistic)")
 
     at = _wait_for_sync(at)
-    undone = next(b for b in at.button if b.key == f"task_undone_{task['id']}")
-    at = undone.set_value(True).run()
-    assert not at.exception, f"Un-complete crashed: {at.exception[0]}"
-    assert any(c.key == f"task_done_{task['id']}" for c in at.checkbox), (
-        "Clicking הושלם should bring the checkbox back (task reopened)"
+    db.clear_task_caches()
+    assert next(t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"])["is_done"], (
+        "Status change did not sync to Supabase"
     )
+    assert task["id"] not in _ss(at, "task_status_override", {}), "Override should be pruned"
+    print("PASS: status change synced to Supabase and the override was pruned")
+
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    at = dropdown.set_value(db.STATUS_IN_PROGRESS).run()
+    assert not at.exception, f"Reopen crashed: {at.exception[0]}"
     at = _wait_for_sync(at)
     db.clear_task_caches()
     assert not next(
         t for t in db.get_tasks(project_id=pid) if t["id"] == task["id"]
-    )["is_done"], "Un-complete did not sync to the database"
-    print("PASS: clicking ✅ הושלם reopens the task and syncs to Supabase")
+    )["is_done"], "Reopening via the dropdown did not sync to the database"
+    print("PASS: switching back to בתהליך reopens the task and syncs to Supabase")
 
 
 def test_no_rerun_loop(pid):
-    """Rendering the list repeatedly must be stable (no state churn / rerun loop)."""
+    """Rendering the list repeatedly must be stable (no state churn / rerun loop).
+
+    Explicitly covers the new status dropdown: an on_change callback that
+    (incorrectly) forced its own rerun on top of Streamlit's automatic
+    post-callback rerun wouldn't necessarily show up as a hang here, but it
+    WOULD show up as churn in the control set or a leftover override —
+    exactly what this asserts against.
+    """
     at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
     at.session_state["view"] = ("project", pid)
     at = at.run()
     first = sorted(b.key for b in at.button if b.key)
+    first_selects = sorted(s.key for s in at.selectbox if s.key)
     for _ in range(3):
         at = at.run()
         assert not at.exception, f"Re-render crashed: {at.exception[0]}"
     assert sorted(b.key for b in at.button if b.key) == first, "Controls changed between reruns"
+    assert sorted(s.key for s in at.selectbox if s.key) == first_selects, (
+        "Selectboxes changed between reruns"
+    )
     assert not _ss(at, "task_urgent_override", {}), "Stale urgency overrides left behind"
-    assert not _ss(at, "task_done_override", {}), "Stale completion overrides left behind"
+    assert not _ss(at, "task_status_override", {}), "Stale status overrides left behind"
     print("PASS: repeated reruns are stable — no rerun loop, no stale overrides")
 
 
@@ -224,7 +241,7 @@ if __name__ == "__main__":
         at, row = test_form_creates_urgent_task(pid)
         test_completed_urgent_is_dimmed(at, row)
         at, task = test_ui_urgency_toggle(pid)
-        test_ui_uncomplete_pill(pid, task)
+        test_ui_status_dropdown_round_trip(pid, task)
         test_no_rerun_loop(pid)
     finally:
         _cleanup()

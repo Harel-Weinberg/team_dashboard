@@ -92,7 +92,7 @@ def test_optimistic_task_and_comment(at, project_id):
     task_title = f"optimistic task {int(time.time())}"
     at.text_input(key=f"task_title_{scope}").set_value(task_title)
     t = time.perf_counter()
-    at = _find_button(at, f"add_task_form_{scope}").set_value(True).run()
+    at = _find_button(at, f"add_task_submit_{scope}").set_value(True).run()
     elapsed = (time.perf_counter() - t) * 1000
     assert _visible(at, task_title), "Task echo should render immediately"
     print(f"PASS: new task visible instantly (interaction run: {elapsed:.0f} ms)")
@@ -104,21 +104,20 @@ def test_optimistic_task_and_comment(at, project_id):
     assert not _ss(at, f"optimistic_tasks_{scope}"), "Task echo not pruned"
     print("PASS: task synced to Supabase, echo pruned")
 
-    # Toggle completion optimistically
-    at.checkbox(key=f"task_done_{task['id']}").set_value(True)
+    # Switch status optimistically (the checkbox was replaced by a dropdown)
+    status_key = f"task_status_{task['id']}"
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
     t = time.perf_counter()
-    at = at.run()
+    at = dropdown.set_value(db.STATUS_DONE).run()
     elapsed = (time.perf_counter() - t) * 1000
-    # A completed task swaps its checkbox for the green "✅ הושלם" pill.
-    assert any(b.key == f"task_undone_{task['id']}" for b in at.button), (
-        "Completion should show instantly as the הושלם pill"
-    )
-    print(f"PASS: task toggle reflected instantly (interaction run: {elapsed:.0f} ms)")
+    dropdown = next(s for s in at.selectbox if s.key == status_key)
+    assert dropdown.value == db.STATUS_DONE, "Status change should show instantly (optimistic)"
+    print(f"PASS: task status reflected instantly (interaction run: {elapsed:.0f} ms)")
     at = _wait_for_sync(at)
     fresh = next(x for x in db.get_tasks(project_id=project_id) if x["id"] == task["id"])
-    assert fresh["is_done"] is True, "Toggle did not sync to DB"
-    assert task["id"] not in _ss(at, "task_done_override", {}), "Override not pruned"
-    print("PASS: task toggle synced to Supabase, override pruned")
+    assert fresh["is_done"] is True, "Status change did not sync to DB"
+    assert task["id"] not in _ss(at, "task_status_override", {}), "Override not pruned"
+    print("PASS: task status synced to Supabase, override pruned")
 
     # Add a comment optimistically
     note = f"optimistic note {int(time.time())}"

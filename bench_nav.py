@@ -103,11 +103,13 @@ def bench_render_phases(pid, rounds=5):
         assert not at.exception, at.exception[0] if at.exception else None
 
     perf.scenario("task_toggle")
-    for _ in range(rounds):
-        boxes = [c for c in at.checkbox]
-        if not boxes:
+    for i in range(rounds):
+        selects = [s for s in at.selectbox if s.key and s.key.startswith("task_status_")]
+        if not selects:
             break
-        at = boxes[0].set_value(not boxes[0].value).run()
+        options = selects[0].options
+        next_value = options[(options.index(selects[0].value) + 1) % len(options)]
+        at = selects[0].set_value(next_value).run()
         assert not at.exception, at.exception[0] if at.exception else None
 
     perf.scenario("chat_send")

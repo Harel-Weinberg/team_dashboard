@@ -19,7 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 
 import psycopg2
 import psycopg2.errors
@@ -254,6 +254,32 @@ UPDATE tasks SET status = CASE WHEN is_done THEN 'done' ELSE 'todo' END
 ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'todo';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date DATE;
 
+-- The kanban board arrived: status is now a real, user-facing 3-state field
+-- (replacing the boolean checkbox in the UI), with Hebrew values instead of
+-- the placeholder English ones above. is_done remains internally in sync
+-- (is_done = status = 'בוצע') so the notification triggers, the urgent-tasks
+-- widget and the mailto helper — all keyed on is_done, all already tested —
+-- needed no changes. Each UPDATE only ever touches rows still holding the
+-- OLD value, so this block is naturally idempotent on every boot.
+UPDATE tasks SET status = 'בתהליך' WHERE status = 'todo';
+UPDATE tasks SET status = 'בוצע'   WHERE status = 'done';
+UPDATE tasks SET status = 'בתהליך' WHERE status = 'in_progress';
+UPDATE tasks SET status = 'בבירור' WHERE status = 'review';
+ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'בתהליך';
+
+-- Task board revamp: rich task details, additive only.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
+-- Attachments are stored as bytes in Postgres rather than in Supabase
+-- Storage: this app has no Storage bucket, policy, client library or extra
+-- secret configured, and task attachments in a small internal tool are a
+-- handful of small PDFs/screenshots — not worth a second storage system and
+-- a new external dependency for that. attachment_data is capped client-side
+-- (see ui_components.MAX_ATTACHMENT_BYTES) before it ever reaches a write.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_name TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_type TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_data BYTEA;
+
 -- Optimistic-send reconciliation: the client mints a uuid4 per message so a
 -- local echo can be matched to its server row exactly, instead of comparing
 -- sender+body text. The partial unique index below also makes the INSERT
@@ -269,6 +295,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_project_time
     ON project_chat (project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
 CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_task_status   ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_msg
     ON project_chat (client_msg_id) WHERE client_msg_id IS NOT NULL;
@@ -378,7 +405,7 @@ def clear_all_caches() -> None:
     _invalidate(
         get_users, get_users_detailed, get_contacts, get_projects,
         _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
-        get_chat,
+        get_chat, get_task_attachment,
     )
 
 
@@ -491,12 +518,14 @@ def get_projects() -> list[dict]:
 
 
 def _revive(row: dict | None) -> dict | None:
-    """row_to_json turns timestamptz into ISO strings — convert them back."""
+    """row_to_json turns timestamptz/date into ISO strings — convert them back."""
     if row is None:
         return None
     for key, value in row.items():
         if key.endswith("_at") and isinstance(value, str):
             row[key] = datetime.fromisoformat(value)
+        elif key == "due_date" and isinstance(value, str):
+            row[key] = date.fromisoformat(value)
     return row
 
 
@@ -523,7 +552,7 @@ def _project_bundle(project_id: int) -> dict:
             SELECT
               (SELECT row_to_json(p) FROM projects p WHERE p.id = %(pid)s) AS project,
               (SELECT row_to_json(s) FROM specs s WHERE s.project_id = %(pid)s) AS spec,
-              (SELECT COALESCE(json_agg(row_to_json(t)
+              (SELECT COALESCE(json_agg(to_jsonb(t) - 'attachment_data'
                        ORDER BY t.is_done, t.is_urgent DESC, t.created_at DESC), '[]'::json)
                  FROM tasks t WHERE t.project_id = %(pid)s) AS tasks,
               (SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.created_at), '[]'::json)
@@ -636,6 +665,30 @@ def get_tasks(project_id: int | None = None, task_type: str = "project") -> list
 
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+def get_task_attachment(task_id: int) -> tuple[str, str, bytes] | None:
+    """(filename, mime_type, raw_bytes) for one task's attachment, or None.
+
+    Deliberately NOT part of _project_bundle: row_to_json() encodes bytea as
+    a hex string rather than real bytes, and even fixed, folding a multi-MB
+    blob into the one JSON payload every task-list read fetches would bloat
+    the hot path for every task in the project, not just the one being
+    downloaded. This is a targeted, indexed single-row lookup instead,
+    fetched only when a card with an attachment actually renders its
+    download button.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT attachment_name, attachment_type, attachment_data "
+            "FROM tasks WHERE id = %s AND attachment_data IS NOT NULL",
+            (task_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return row["attachment_name"], row["attachment_type"], bytes(row["attachment_data"])
+
+
+@st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
 def get_urgent_open_tasks() -> list[dict]:
     """All open urgent tasks across every project, for the home-screen widget.
 
@@ -656,11 +709,26 @@ def get_urgent_open_tasks() -> list[dict]:
 
 
 def _clear_task_caches() -> None:
-    _invalidate(_project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks)
+    _invalidate(
+        _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
+        get_task_attachment,
+    )
 
 
 # Public alias — tests and callers shouldn't reach for the underscore name.
 clear_task_caches = _clear_task_caches
+
+
+# The task board's 3-state field. is_done is kept as an internal mirror
+# (is_done = status == STATUS_DONE) purely so notifications, the urgent-tasks
+# widget and the mailto helper — all keyed on is_done, all already tested —
+# never had to be touched for this. Both non-done statuses map to
+# is_done=False, which is exactly the "open task" grouping those consumers
+# already expect.
+STATUS_IN_PROGRESS = "בתהליך"
+STATUS_IN_REVIEW = "בבירור"
+STATUS_DONE = "בוצע"
+TASK_STATUSES = (STATUS_IN_PROGRESS, STATUS_IN_REVIEW, STATUS_DONE)
 
 
 def add_task(
@@ -670,14 +738,28 @@ def add_task(
     project_id: int | None = None,
     task_type: str = "project",
     is_urgent: bool = False,
+    *,
+    description: str = "",
+    due_date: date | None = None,
+    tags: list[str] | None = None,
+    attachment: tuple[str, str, bytes] | None = None,
 ) -> None:
+    """`attachment` is (filename, mime_type, raw_bytes), or None."""
+    att_name, att_type, att_data = attachment if attachment else (None, None, None)
     with get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO tasks (project_id, task_type, title, assignee, created_by, is_urgent)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO tasks (
+                project_id, task_type, title, assignee, created_by, is_urgent,
+                description, due_date, tags, attachment_name, attachment_type, attachment_data
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (project_id, task_type, title, assignee, user, is_urgent),
+            (
+                project_id, task_type, title, assignee, user, is_urgent,
+                description, due_date, tags or [], att_name, att_type,
+                psycopg2.Binary(att_data) if att_data else None,
+            ),
         )
     _clear_task_caches()
 
@@ -689,18 +771,47 @@ def set_task_urgent(task_id: int, urgent: bool) -> None:
 
 
 def set_task_done(task_id: int, done: bool, user: str) -> None:
+    """Boolean compatibility entry point. Also keeps `status` in sync:
+    True -> STATUS_DONE, False -> STATUS_IN_PROGRESS (a task reopened this way
+    always lands "in progress", never "in review" — that richer distinction
+    only exists via set_task_status, the dropdown's own write path).
+    """
     with get_cursor() as cur:
         if done:
             cur.execute(
-                "UPDATE tasks SET is_done = TRUE, completed_by = %s, completed_at = NOW() "
-                "WHERE id = %s",
-                (user, task_id),
+                "UPDATE tasks SET is_done = TRUE, status = %s, "
+                "completed_by = %s, completed_at = NOW() WHERE id = %s",
+                (STATUS_DONE, user, task_id),
             )
         else:
             cur.execute(
-                "UPDATE tasks SET is_done = FALSE, completed_by = NULL, completed_at = NULL "
-                "WHERE id = %s",
-                (task_id,),
+                "UPDATE tasks SET is_done = FALSE, status = %s, "
+                "completed_by = NULL, completed_at = NULL WHERE id = %s",
+                (STATUS_IN_PROGRESS, task_id),
+            )
+    _clear_task_caches()
+
+
+def set_task_status(task_id: int, status: str, user: str) -> None:
+    """Primary write path for the status dropdown. One atomic UPDATE keeps
+    status and is_done consistent, and sets/clears completed_by/completed_at
+    on the same edges set_task_done does.
+    """
+    if status not in TASK_STATUSES:
+        raise ValueError(f"unknown task status: {status!r}")
+    done = status == STATUS_DONE
+    with get_cursor() as cur:
+        if done:
+            cur.execute(
+                "UPDATE tasks SET status = %s, is_done = TRUE, "
+                "completed_by = %s, completed_at = NOW() WHERE id = %s",
+                (status, user, task_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE tasks SET status = %s, is_done = FALSE, "
+                "completed_by = NULL, completed_at = NULL WHERE id = %s",
+                (status, task_id),
             )
     _clear_task_caches()
 

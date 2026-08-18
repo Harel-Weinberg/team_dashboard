@@ -347,24 +347,6 @@ a.task-mail:hover {
 
 /* --- Task row controls ---------------------------------------------------- */
 
-/* Completed: prominent green pill (click to un-complete). */
-[class*="st-key-task_undone_"] button {
-    background: #e8f7ee !important;
-    color: #137a3f !important;
-    border: 1px solid rgba(19, 122, 63, 0.22) !important;
-    border-radius: 999px !important;
-    padding: 0.12rem 0.6rem;
-    min-height: 0;
-    font-size: 0.78rem;
-    font-weight: 700;
-    white-space: nowrap;
-    box-shadow: 0 1px 6px rgba(19, 122, 63, 0.12);
-}
-[class*="st-key-task_undone_"] button:hover {
-    background: #d7f0e2 !important;
-    border-color: rgba(19, 122, 63, 0.5) !important;
-}
-
 /* Urgency toggle — active state: red pill. */
 [class*="st-key-task_urgent_on_"] button {
     background: #fdecec !important;
@@ -423,6 +405,60 @@ a.task-mail:hover {
 [data-testid="stMain"] [data-testid="stForm"] [data-testid="stCheckbox"] label {
     margin-bottom: 0;
     white-space: nowrap;
+}
+
+/* Task board revamp: Apple-style task cards ------------------------------ */
+
+/* Each task card: white surface, generous radius, soft shadow — matching
+   every other card in the app (sidebar, project bubbles, urgent widget). */
+[class*="st-key-task_card_"] {
+    background: rgba(255, 255, 255, 0.92);
+    border-radius: 24px;
+    padding: 1.1rem 1.25rem 0.6rem;
+    margin-bottom: 0.85rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    backdrop-filter: blur(10px);
+}
+/* A task still syncing to the server reads as a lighter, pending version of
+   the same card, consistent with how chat/comments mute an in-flight send. */
+[class*="st-key-task_card_pending_"] {
+    opacity: 0.7;
+}
+
+/* Tag pills next to the task title. Fixed vocabulary -> fixed palette, so
+   they read at a glance; anything outside the vocabulary (defensive only —
+   the form only offers these four) falls back to a neutral grey pill. */
+.task-tag {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    margin-inline-end: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+.task-tag.tag-frontend { background: #e0f0ff; color: #0a5cad; }
+.task-tag.tag-backend  { background: #eee5ff; color: #5b3aa8; }
+.task-tag.tag-bug      { background: #fdecec; color: #c0202f; }
+.task-tag.tag-feature  { background: #e8f7ee; color: #137a3f; }
+.task-tag.tag-default  { background: rgba(35, 33, 58, 0.08); color: #6b7280; }
+
+/* Add-task form: the "הוספה" submit button turns solid, vivid green on
+   hover — a distinct "this commits the task" affordance, deliberately not
+   the app's Apple-blue primary color used everywhere else. */
+[class*="st-key-add_task_submit_"] button:hover {
+    background: #28a745 !important;
+    color: #ffffff !important;
+    border-color: transparent !important;
+    box-shadow: 0 6px 18px rgba(40, 167, 69, 0.35);
+}
+
+/* Task comments, rendered with the same bubbles as the project chat tab.
+   A pending (not-yet-synced) comment is muted the same way a pending chat
+   send is — see the chatpend_ rule below, which this mirrors exactly. */
+[class*="st-key-taskcommentpend_"] {
+    opacity: 0.6;
 }
 
 /* =======================================================================
