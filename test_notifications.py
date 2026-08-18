@@ -103,7 +103,9 @@ class Spy:
         self.calls = []
         self._lock = threading.Lock()
 
-    def __call__(self, user_id, message):
+    def __call__(self, user_id, message, contact=None):
+        # `contact` is resolved on the render thread and passed in, so the
+        # worker never calls db.get_contacts() itself.
         with self._lock:
             self.calls.append((user_id, message))
         return notifications.NotificationResult(True, "sent", "spy")

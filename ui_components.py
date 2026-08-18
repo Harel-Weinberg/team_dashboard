@@ -20,11 +20,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 import auth
 import database as db
 import notifications
 import optimistic
+import perf
 
 LOCAL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -68,11 +70,26 @@ def _resolve_pending_projects() -> list[dict]:
     return pending
 
 
+def _rerun_scoped() -> None:
+    """Rerun just the enclosing fragment, falling back to a full rerun.
+
+    Streamlit only accepts scope="fragment" while it is actually running a
+    fragment rerun. The same code path also executes during a full script run
+    (first paint, or any rerun triggered from outside the fragment), and asking
+    for fragment scope there raises. Try the cheap option, take the correct one.
+    """
+    try:
+        st.rerun(scope="fragment")
+    except StreamlitAPIException:
+        st.rerun()
+
+
 def go_home() -> None:
     """Clear the selected project and return to the main (bubbles) screen."""
     st.session_state["view"] = None
 
 
+@perf.track("sidebar")
 def render_sidebar():
     """Render navigation. Returns the current view: ('project', id) | ('pending_project', temp_id) | 'urgent' | 'backlog' | 'users' | None."""
     user = st.session_state["user"]
@@ -93,11 +110,10 @@ def render_sidebar():
             go_home()
             st.rerun()
 
-        top_left, top_right = st.columns(2)
-        if top_left.button("🔄 רענון", use_container_width=True):
-            st.cache_data.clear()  # force-pull teammates' latest changes
-            st.rerun()
-        if top_right.button("🚪 יציאה", use_container_width=True):
+        # No manual refresh button: chat polls itself every 3s and the task
+        # caches expire on their own, so there is nothing left for the user to
+        # force.
+        if st.button("🚪 יציאה", use_container_width=True):
             auth.logout()
 
         st.divider()
@@ -177,6 +193,7 @@ def render_sidebar():
 # ---------------------------------------------------------------------------
 
 
+@perf.track("spec")
 def _render_spec(project_id: int):
     user = st.session_state["user"]
     spec = db.get_spec(project_id)
@@ -426,7 +443,7 @@ def _render_task(task: dict, comments: list[dict]):
                         comment_echoes.setdefault(task["id"], []).append(
                             {"author": user, "content": text, "future": future}
                         )
-                        st.rerun()
+                        _rerun_scoped()
 
             # Deleting stays synchronous on purpose: destructive actions should
             # confirm against the DB before the row disappears from the UI.
@@ -451,7 +468,24 @@ def _render_pending_task(echo: dict):
 
 
 def render_task_board(project_id: int | None = None, task_type: str = "project"):
+    """Public entry point; the body runs inside a fragment.
+
+    A checkbox, an urgency toggle or an add-task submit therefore re-renders
+    only this board — not the sidebar, the header, the theme injection and the
+    other two tabs.
+    """
+    _task_board_fragment(project_id, task_type)
+
+
+@st.fragment
+@perf.track("tasks")
+def _task_board_fragment(project_id: int | None, task_type: str):
     user = st.session_state["user"]
+    # A fragment-scoped rerun never re-enters main(), so drain the toast queue
+    # here as well — otherwise a completion/urgency toast would not appear
+    # until some later full rerun.
+    if toast := st.session_state.pop("pending_toast", None):
+        st.toast(toast)
     scope = f"{task_type}_{project_id if project_id is not None else 'global'}"
     echo_key = f"optimistic_tasks_{scope}"
 
@@ -489,7 +523,7 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
                     st.session_state["pending_toast"] = notifications.notify_urgent_assignment(
                         assignee, text
                     )
-                st.rerun()
+                _rerun_scoped()
 
     # --- Task list -----------------------------------------------------------
     tasks = db.get_tasks(project_id=project_id, task_type=task_type)
@@ -516,54 +550,115 @@ def render_task_board(project_id: int | None = None, task_type: str = "project")
 
 
 # ---------------------------------------------------------------------------
-# Module C — Project chat
+# Module C — Project chat (live + optimistic send)
 # ---------------------------------------------------------------------------
+
+# Must stay LONGER than database.CHAT_TTL, or the poll only re-serves cache.
+CHAT_POLL = "3s"
+
+
+def _pending_chat(project_id: int) -> list[dict]:
+    """This session's messages that have not yet come back from the server."""
+    return st.session_state.setdefault("pending_msgs", {}).setdefault(project_id, [])
+
+
+def _dispatch_chat_write(project_id: int, entry: dict) -> None:
+    """(Re)send one pending message on the background pool.
+
+    The insert is idempotent on client_msg_id, so retrying after an ambiguous
+    failure cannot double-post.
+    """
+    entry["future"] = optimistic.submit_write(
+        "הודעה בצ'אט",
+        db.add_chat_message,
+        project_id,
+        entry["body"],
+        entry["sender"],
+        entry["client_msg_id"],
+    )
+
+
+def _chat_meta_html(sender: str, when: str) -> str:
+    # Explicit dir="rtl": sender names are often Latin, and a Latin-first line
+    # would flip the whole meta line LTR and drag its separator to the left.
+    return (
+        f'<span dir="rtl"><strong>{html.escape(sender or "")}</strong>'
+        f" · <code>{when}</code></span>"
+    )
+
+
+def _on_chat_viewed(project_id: int, messages: list[dict]) -> None:
+    """Seam for the unread-badge feature (F3).
+
+    F3 will upsert chat_reads.last_read_at here, debounced so it writes only
+    when the project actually had unread messages — never on every poll tick.
+    Deliberately a no-op until then.
+    """
+
+
+@st.fragment(run_every=CHAT_POLL)
+@perf.track("chat")
+def _chat_fragment(project_id: int):
+    """The whole chat panel, isolated from the rest of the page.
+
+    Being a fragment is what makes polling affordable: every 3s this re-runs
+    on its own, so a teammate's message appears without a click and without
+    re-rendering the sidebar, the header or the other two tabs.
+    """
+    user = st.session_state["user"]
+    messages = db.get_chat(project_id)
+
+    # Reconcile: drop any echo whose id has come back from the server. Matching
+    # on the client id is exact — the old sender+body comparison would collapse
+    # two identical messages into one.
+    landed = {m["client_msg_id"] for m in messages if m.get("client_msg_id")}
+    pending = [e for e in _pending_chat(project_id) if e["client_msg_id"] not in landed]
+    st.session_state["pending_msgs"][project_id] = pending
+
+    for msg in messages:
+        with st.chat_message(msg["sender"] or "unknown",
+                             avatar=AVATARS.get(msg["sender"], DEFAULT_AVATAR)):
+            st.markdown(_chat_meta_html(msg["sender"], fmt_ts(msg["created_at"])),
+                        unsafe_allow_html=True)
+            st.markdown(msg["message"])
+
+    for entry in pending:
+        future = entry.get("future")
+        failed = future is not None and future.done() and future.exception() is not None
+        # Keyed containers get an st-key-* class in the DOM; theme.py mutes the
+        # in-flight ones. Failed messages are NOT muted — they need attention.
+        key = f"{'chatfail' if failed else 'chatpend'}_{entry['client_msg_id']}"
+        with st.container(key=key):
+            with st.chat_message(entry["sender"],
+                                 avatar=AVATARS.get(entry["sender"], DEFAULT_AVATAR)):
+                st.markdown(_chat_meta_html(entry["sender"], fmt_ts(entry["created_at"])),
+                            unsafe_allow_html=True)
+                st.markdown(entry["body"])
+                if failed:
+                    # Never silently drop a message the user watched appear.
+                    st.caption(f"⚠️ ההודעה לא נשלחה — {future.exception()}")
+                    if st.button("↻ שליחה חוזרת", key=f"retry_{entry['client_msg_id']}"):
+                        _dispatch_chat_write(project_id, entry)
+                        _rerun_scoped()
+
+    _on_chat_viewed(project_id, messages)
+
+    if prompt := st.chat_input("כתבו הודעה לצוות...", key=f"chat_input_{project_id}"):
+        text = prompt.strip()
+        if text:
+            entry = {
+                "client_msg_id": str(uuid.uuid4()),
+                "sender": user,
+                "body": text,
+                "created_at": datetime.now(LOCAL_TZ),
+            }
+            _dispatch_chat_write(project_id, entry)
+            _pending_chat(project_id).append(entry)
+            _rerun_scoped()
 
 
 def _render_chat(project_id: int):
-    user = st.session_state["user"]
-    echo_key = f"optimistic_chat_{project_id}"
-
-    messages = db.get_chat(project_id)
-    pending = optimistic.surviving_echoes(
-        st.session_state.get(echo_key, []),
-        landed=lambda e: any(
-            m["sender"] == e["sender"] and m["message"] == e["message"] for m in messages
-        ),
-    )
-    st.session_state[echo_key] = pending
-
-    # Meta lines are explicit dir="rtl" HTML: sender names are often Latin, and
-    # a Latin-first line would flip LTR and drag its emoji to the left.
-    for msg in messages:
-        avatar = AVATARS.get(msg["sender"], DEFAULT_AVATAR)
-        with st.chat_message(msg["sender"] or "unknown", avatar=avatar):
-            st.markdown(
-                f'<span dir="rtl"><strong>{html.escape(msg["sender"] or "")}</strong>'
-                f" · <code>{fmt_ts(msg['created_at'])}</code></span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(msg["message"])
-    for echo in pending:
-        avatar = AVATARS.get(echo["sender"], DEFAULT_AVATAR)
-        with st.chat_message(echo["sender"], avatar=avatar):
-            st.markdown(
-                f'<span dir="rtl"><strong>{html.escape(echo["sender"])}</strong>'
-                " · 🕓 <em>נשלח…</em></span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(echo["message"])
-
-    prompt = st.chat_input("כתבו הודעה לצוות...", key=f"chat_input_{project_id}")
-    if prompt and prompt.strip():
-        text = prompt.strip()
-        future = optimistic.submit_write(
-            "הודעה בצ'אט", db.add_chat_message, project_id, text, user
-        )
-        st.session_state.setdefault(echo_key, []).append(
-            {"sender": user, "message": text, "future": future}
-        )
-        st.rerun()
+    _chat_fragment(project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +666,7 @@ def _render_chat(project_id: int):
 # ---------------------------------------------------------------------------
 
 
+@perf.track("project_page")
 def render_project_dashboard(project: dict):
     # Fill every cache this page reads in one parallel burst (~1 round-trip of
     # wall-clock) instead of letting the tabs fetch sequentially.
@@ -615,6 +711,7 @@ def render_adhoc_board(title: str, subtitle: str, task_type: str):
     render_task_board(project_id=None, task_type=task_type)
 
 
+@perf.track("welcome")
 def render_welcome():
     """Personalized greeting + floating project bubbles (main screen)."""
     user = st.session_state["user"]

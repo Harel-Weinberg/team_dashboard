@@ -13,9 +13,24 @@ How it works:
     failed background write as a warning, so a lost write is never silent —
     the UI then falls back to the database's truth.
 
-Thread-safety: database.py uses a ThreadedConnectionPool, so worker threads
-each get their own connection. Workers never touch st.session_state — only
-the main script thread reads the Futures.
+Thread discipline: a worker has no ScriptRunContext, so it must not call into
+Streamlit. Everything st-flavoured is resolved on the render thread before
+dispatch:
+
+  * the connection pool is created by db.ensure_pool() in main(), and workers
+    borrow from a plain module global (database.py) rather than reaching
+    through st.cache_resource / st.secrets;
+  * cache invalidation from a worker is queued by database._invalidate() and
+    applied by the render thread on its next rerun;
+  * notification contacts are looked up by notifications.dispatch() before the
+    job is submitted.
+
+Workers never touch st.session_state; only the render thread reads the Futures.
+
+One deliberate exception: the prefetch pool in database.py calls @st.cache_data
+readers from worker threads — that IS cache warming, and there is no way to do
+it from the render thread without blocking. Those readers all declare
+show_spinner=False, so no worker ever attempts a UI call.
 """
 
 from collections.abc import Callable
@@ -64,6 +79,8 @@ def discard_echoes() -> None:
     for key in [k for k in st.session_state if str(k).startswith("optimistic_")]:
         st.session_state.pop(key, None)
     st.session_state.pop("task_done_override", None)
+    # Chat echoes are tagged with the sender's name too.
+    st.session_state.pop("pending_msgs", None)
 
 
 def report_sync_failures() -> None:

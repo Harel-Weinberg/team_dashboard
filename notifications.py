@@ -157,12 +157,17 @@ def _send_whatsapp(phone: str, message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def send_notification(user_id: str, message: str) -> NotificationResult:
+def send_notification(
+    user_id: str, message: str, contact: dict | None = None
+) -> NotificationResult:
     """Send `message` to the user named `user_id`. Always logs; never blocks the UI.
 
-    Runs on a worker thread (see dispatch) — it must not touch st.session_state.
+    Runs on a worker thread (see dispatch), so it must not call into Streamlit
+    at all. `contact` is resolved by the caller on the render thread; the
+    lookup fallback below only runs when this is called synchronously.
     """
-    contact = db.get_contacts().get(user_id, {})
+    if contact is None:
+        contact = db.get_contacts().get(user_id, {})
     target = contact.get("phone") if channel() == "whatsapp" else contact.get("email")
 
     LOG.info("to=%s channel=%s target=%s message=%s", user_id, channel(), target or "-", message)
@@ -187,9 +192,13 @@ def dispatch(recipient: str, message: str) -> str:
 
     Failures on the worker thread are surfaced by optimistic.report_sync_failures().
     """
-    optimistic.submit_write(f"התראה ל-{recipient}", send_notification, recipient, message)
-
+    # Resolve the contact HERE, on the render thread: db.get_contacts() is an
+    # @st.cache_data reader and the worker must not call one.
     contact = db.get_contacts().get(recipient, {})
+    optimistic.submit_write(
+        f"התראה ל-{recipient}", send_notification, recipient, message, contact
+    )
+
     has_target = bool(contact.get("phone") if channel() == "whatsapp" else contact.get("email"))
     if not has_target:
         return f"📣 אין פרטי קשר ל-{recipient} — ההתראה נרשמה ביומן"

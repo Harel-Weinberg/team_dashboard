@@ -52,8 +52,12 @@ def test_bundle_matches_reality(pid, task):
     assert [c["content"] for c in comments] == ["הערה ראשונה"]
     assert isinstance(comments[0]["created_at"], datetime)
 
-    assert [m["message"] for m in bundle["chat"]] == ["הודעה ראשונה"]
-    assert isinstance(bundle["chat"][0]["created_at"], datetime)
+    # Chat is no longer part of the bundle — it has its own short-TTL loader so
+    # the 3s chat fragment can poll it without dragging the rest of the page down.
+    assert "chat" not in bundle
+    chat = db.get_chat(pid)
+    assert [m["message"] for m in chat] == ["הודעה ראשונה"]
+    assert isinstance(chat[0]["created_at"], datetime)
     print("PASS: bundle returns project+spec+tasks+comments+chat correctly, timestamps revived")
 
 
@@ -62,8 +66,15 @@ def test_warm_then_zero_db_access(pid, task):
     db.clear_task_caches()
     db.warm_project(pid, wait=True)
 
-    real_pool = db._get_pool
-    db._get_pool = lambda: (_ for _ in ()).throw(RuntimeError("unexpected DB access"))
+    # Gate every route to the database, not just the pool factory: get_cursor()
+    # now borrows from a plain module global (see the thread-discipline notes in
+    # database.py), so patching the pool constructor would no longer intercept.
+    real_cursor = db.get_cursor
+
+    def _no_db(*_args, **_kwargs):
+        raise RuntimeError("unexpected DB access")
+
+    db.get_cursor = _no_db
     try:
         assert db.get_project(pid)["name"] == TEMP_PROJECT
         assert db.get_spec(pid)["content"] == "תוכן אפיון"
@@ -73,7 +84,7 @@ def test_warm_then_zero_db_access(pid, task):
         db.get_contacts()
         db.get_users()
     finally:
-        db._get_pool = real_pool
+        db.get_cursor = real_cursor
     print("PASS: after warm_project, the full dashboard renders with ZERO DB round-trips")
 
 

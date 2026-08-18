@@ -15,6 +15,7 @@ Performance design:
 """
 
 import hashlib
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from contextlib import contextmanager
@@ -23,22 +24,86 @@ from datetime import datetime
 import psycopg2
 import psycopg2.errors
 import streamlit as st
+
+import perf
 from psycopg2 import pool as pgpool
 from psycopg2.extras import RealDictCursor
 
 # TTLs tuned for navigation speed. Staleness is bounded anyway: every write
 # clears the caches it touches (own changes are always instant), and 🔄 Refresh
 # clears everything — the TTL only caps how old a TEAMMATE's change can look.
-VOLATILE_TTL = 30   # seconds — specs, tasks, comments, chat
+VOLATILE_TTL = 30   # seconds — specs, tasks, comments
 STABLE_TTL = 120    # seconds — project & user lists
+# Chat is polled by a 3s fragment. Its TTL must be SHORTER than that poll
+# interval, or the poller just re-serves cache and the "live" chat isn't live.
+CHAT_TTL = 2        # seconds — project chat only
 
 # ---------------------------------------------------------------------------
 # Connection handling
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Thread discipline (see optimistic.py)
+#
+# Background workers must not call into Streamlit: st.secrets, st.session_state
+# and the st.cache_* APIs all expect a ScriptRunContext, and a worker has none.
+# Two mechanisms keep that true:
+#
+#   * the pool object is resolved ONCE on the render thread and kept in a plain
+#     module global, so get_cursor() on a worker touches no st.* API at all;
+#   * cache invalidation from a worker is queued and drained by the render
+#     thread on its next rerun (_invalidate / drain_deferred_invalidations).
+#
+# Worker threads are identified by name — the pools below set the prefixes.
+# ---------------------------------------------------------------------------
+
+_WORKER_PREFIXES = ("db-sync", "db-prefetch")
+
+_POOL: pgpool.ThreadedConnectionPool | None = None
+_DEFERRED_CLEARS: list[tuple] = []
+_DEFERRED_LOCK = threading.Lock()
+
+
+def on_worker_thread() -> bool:
+    return threading.current_thread().name.startswith(_WORKER_PREFIXES)
+
+
+def _invalidate(*cached_fns) -> None:
+    """Clear cached readers — immediately on the render thread, deferred on a worker."""
+    if on_worker_thread():
+        with _DEFERRED_LOCK:
+            _DEFERRED_CLEARS.append(cached_fns)
+        return
+    for fn in cached_fns:
+        fn.clear()
+
+
+def drain_deferred_invalidations() -> int:
+    """Apply cache clears queued by worker threads. Render thread only."""
+    with _DEFERRED_LOCK:
+        pending = list(_DEFERRED_CLEARS)
+        _DEFERRED_CLEARS.clear()
+    for group in pending:
+        for fn in group:
+            fn.clear()
+    return len(pending)
+
+
+def ensure_pool() -> pgpool.ThreadedConnectionPool:
+    """Resolve the pool on the render thread and cache it in a plain global.
+
+    Called from main() before anything can dispatch background work, so a
+    worker never has to reach through st.cache_resource / st.secrets itself.
+    """
+    global _POOL
+    if _POOL is None:
+        _POOL = _create_pool()
+    return _POOL
+
+
 @st.cache_resource(show_spinner=False)
-def _get_pool() -> pgpool.ThreadedConnectionPool:
+def _create_pool() -> pgpool.ThreadedConnectionPool:
     """One connection pool per server process, shared safely across sessions/threads."""
     cfg = st.secrets["database"]
     # minconn=4: the pool opens (and TLS-handshakes) these eagerly at startup.
@@ -69,7 +134,7 @@ def get_cursor():
     Commits on success, rolls back on error. Broken connections are closed and
     discarded from the pool instead of being handed out again.
     """
-    p = _get_pool()
+    p = _POOL if _POOL is not None else ensure_pool()
     conn = p.getconn()
     try:
         if conn.closed:  # stale connection left in the pool — swap for a fresh one
@@ -302,18 +367,16 @@ def set_user_contact(username: str, email: str | None, phone: str | None) -> Non
 
 
 def _clear_user_caches() -> None:
-    get_users.clear()
-    get_users_detailed.clear()
-    get_contacts.clear()
+    _invalidate(get_users, get_users_detailed, get_contacts)
 
 
 def clear_all_caches() -> None:
     """Clear every cached reader (used after a change that touches many tables)."""
-    for cached in (
+    _invalidate(
         get_users, get_users_detailed, get_contacts, get_projects,
         _project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks,
-    ):
-        cached.clear()
+        get_chat,
+    )
 
 
 def username_exists(username: str, exclude: str | None = None) -> bool:
@@ -435,6 +498,7 @@ def _revive(row: dict | None) -> dict | None:
 
 
 @st.cache_data(ttl=VOLATILE_TTL, show_spinner=False)
+@perf.track("db:bundle_query")
 def _project_bundle(project_id: int) -> dict:
     """Everything the project dashboard shows, in ONE database round-trip.
 
@@ -443,6 +507,12 @@ def _project_bundle(project_id: int) -> dict:
     better — concurrent TLS handshakes serialize on the GIL — so instead the
     whole payload is aggregated to JSON server-side and fetched in a single
     statement on one warm pooled connection.
+
+    Chat is deliberately NOT part of this bundle. It is polled every 3s by the
+    chat fragment and needs a ~2s TTL; keeping it here would drag spec, tasks
+    and comments down to that TTL too, and — worse — every sent message would
+    invalidate the whole bundle and make the next render block on a full
+    refetch. See get_chat().
     """
     with get_cursor() as cur:
         cur.execute(
@@ -455,9 +525,7 @@ def _project_bundle(project_id: int) -> dict:
                  FROM tasks t WHERE t.project_id = %(pid)s) AS tasks,
               (SELECT COALESCE(json_agg(row_to_json(c) ORDER BY c.created_at), '[]'::json)
                  FROM task_comments c JOIN tasks t ON t.id = c.task_id
-                WHERE t.project_id = %(pid)s) AS comments,
-              (SELECT COALESCE(json_agg(row_to_json(m) ORDER BY m.created_at), '[]'::json)
-                 FROM project_chat m WHERE m.project_id = %(pid)s) AS chat
+                WHERE t.project_id = %(pid)s) AS comments
             """,
             {"pid": project_id},
         )
@@ -482,7 +550,6 @@ def _project_bundle(project_id: int) -> dict:
         "spec": spec,
         "tasks": [_revive(t) for t in raw["tasks"]],
         "comments_map": comments_map,
-        "chat": [_revive(m) for m in raw["chat"]],
     }
 
 
@@ -503,7 +570,7 @@ def add_project(name: str, user: str) -> int | None:
                 "INSERT INTO specs (project_id) VALUES (%s) ON CONFLICT DO NOTHING",
                 (project_id,),
             )
-        get_projects.clear()
+        _invalidate(get_projects)
         return project_id
     except psycopg2.errors.UniqueViolation:
         return None
@@ -513,7 +580,7 @@ def delete_project(project_id: int) -> None:
     """Remove a project and (via ON DELETE CASCADE) its spec, tasks, comments and chat."""
     with get_cursor() as cur:
         cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-    get_projects.clear()
+    _invalidate(get_projects)
     _clear_task_caches()  # also clears _project_bundle (spec/comments/chat included)
 
 
@@ -539,7 +606,7 @@ def save_spec(project_id: int, content: str, user: str) -> None:
             """,
             (project_id, content, user),
         )
-    _project_bundle.clear()
+    _invalidate(_project_bundle)
 
 
 # ---------------------------------------------------------------------------
@@ -586,10 +653,7 @@ def get_urgent_open_tasks() -> list[dict]:
 
 
 def _clear_task_caches() -> None:
-    _project_bundle.clear()
-    _board_tasks.clear()
-    _board_comments.clear()
-    get_urgent_open_tasks.clear()
+    _invalidate(_project_bundle, _board_tasks, _board_comments, get_urgent_open_tasks)
 
 
 # Public alias — tests and callers shouldn't reach for the underscore name.
@@ -678,8 +742,7 @@ def add_comment(task_id: int, content: str, user: str) -> None:
             "INSERT INTO task_comments (task_id, author, content) VALUES (%s, %s, %s)",
             (task_id, user, content),
         )
-    _project_bundle.clear()
-    _board_comments.clear()
+    _invalidate(_project_bundle, _board_comments)
 
 
 # ---------------------------------------------------------------------------
@@ -687,17 +750,55 @@ def add_comment(task_id: int, content: str, user: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_chat(project_id: int) -> list[dict]:
-    return _project_bundle(project_id)["chat"]
+# Rendering shows the whole conversation today (single digits of messages per
+# project). The query is newest-first so capping it is a one-line change:
+# pass a smaller `limit` and add a "load earlier" control.
+CHAT_PAGE = 200
 
 
-def add_chat_message(project_id: int, message: str, user: str) -> None:
+@st.cache_data(ttl=CHAT_TTL, show_spinner=False)
+@perf.track("db:chat_query")
+def get_chat(project_id: int, limit: int = CHAT_PAGE) -> list[dict]:
+    """The newest `limit` messages for a project, oldest-first for rendering."""
     with get_cursor() as cur:
         cur.execute(
-            "INSERT INTO project_chat (project_id, sender, message) VALUES (%s, %s, %s)",
-            (project_id, user, message),
+            "SELECT * FROM project_chat WHERE project_id = %s "
+            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            (project_id, limit),
         )
-    _project_bundle.clear()
+        return list(reversed(cur.fetchall()))
+
+
+def add_chat_message(
+    project_id: int, message: str, user: str, client_msg_id: str | None = None
+) -> None:
+    """Insert a chat message. Safe to retry: a repeated client_msg_id is a no-op.
+
+    Runs on a background worker thread — no st.* calls beyond _invalidate(),
+    which defers to the render thread when called off-thread.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO project_chat (project_id, sender, message, client_msg_id) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (client_msg_id) WHERE client_msg_id IS NOT NULL DO NOTHING",
+            (project_id, user, message, client_msg_id),
+        )
+    _refresh_chat_after_write()
+
+
+def _refresh_chat_after_write() -> None:
+    """Invalidate the chat cache for a SYNCHRONOUS write only.
+
+    From a background worker there is deliberately nothing to do. The sender is
+    already looking at a local echo of their own message, and CHAT_TTL is
+    shorter than the fragment's poll interval, so the server copy replaces that
+    echo within one tick. Clearing the cache here instead makes the very next
+    render block on a full refetch (~185ms against eu-central-1) — measurably
+    the stall that the optimistic send path exists to remove.
+    """
+    if not on_worker_thread():
+        get_chat.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +815,11 @@ def _prefetch_pool() -> ThreadPoolExecutor:
 
 
 def warm_project(project_id: int, wait: bool = True) -> None:
-    """Populate the project's bundle cache (one query) plus the shared lookups.
+    """Populate the project's bundle cache plus chat and the shared lookups.
+
+    The bundle and the chat are two separate queries but they are issued
+    concurrently on the prefetch pool, so opening a project still costs about
+    one round-trip of wall-clock rather than two.
 
     wait=False is fire-and-forget: used from the home screen to silently
     pre-warm projects so clicking a bubble feels instant. Cache hits return in
@@ -724,6 +829,7 @@ def warm_project(project_id: int, wait: bool = True) -> None:
     """
     jobs = (
         lambda: _project_bundle(project_id),
+        lambda: get_chat(project_id),
         lambda: get_contacts(),
         lambda: get_users(),
     )

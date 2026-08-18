@@ -496,6 +496,15 @@ a.task-mail:hover {
     width: 100%;
     margin: 0;
 }
+/* --- Chat: messages still in flight ------------------------------------- */
+/* st.container(key=...) emits an st-key-<key> class. Pending sends are muted
+   just enough to read as "in flight"; failed ones use a different key prefix
+   and stay at full opacity so the retry control is not easy to miss. */
+[class*="st-key-chatpend_"] {
+    opacity: 0.6;
+    transition: opacity 0.25s ease;
+}
+
 </style>
 """
 

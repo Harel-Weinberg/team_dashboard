@@ -1,4 +1,10 @@
-"""Temporary benchmark: home -> project navigation latency (cold vs warm cache)."""
+"""Benchmark: navigation latency and per-phase render cost.
+
+Run with:  DASH_PERF=1 python bench_nav.py
+
+Without DASH_PERF the per-phase table is empty (perf.py compiles itself out);
+the navigation timings still work either way.
+"""
 
 import statistics
 import time
@@ -6,6 +12,7 @@ import time
 import streamlit as st
 
 import database as db
+import perf
 from test_login_flow import TEMP_ADMIN, TEMP_ADMIN_PW, cleanup, create_temp_admin, login, new_app
 
 TEMP_PROJECT = "temp_test_nav_bench"
@@ -68,11 +75,67 @@ def bench_realistic(pid, rounds=3):
     print(f"REALISTIC (home prefetch->click): avg {statistics.mean(times):6.0f} ms  {[f'{x:.0f}' for x in times]}")
 
 
+def bench_render_phases(pid, rounds=5):
+    """Per-phase cost inside a warm, logged-in session — the interaction path.
+
+    Note on "tab switch": st.tabs renders every tab body server-side and the
+    switch itself is pure client-side CSS, so there is no round-trip to time.
+    The number that matters is that ANY interaction on the project page
+    re-renders spec + tasks + chat together, which is what the warm rerun below
+    measures.
+    """
+    at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+    at.session_state["view"] = ("project", pid)
+    at = at.run()
+
+    perf.reset()
+
+    perf.scenario("home")
+    for _ in range(rounds):
+        at.session_state["view"] = None
+        at = at.run()
+        assert not at.exception, at.exception[0] if at.exception else None
+
+    perf.scenario("project_warm")
+    for _ in range(rounds):
+        at.session_state["view"] = ("project", pid)
+        at = at.run()
+        assert not at.exception, at.exception[0] if at.exception else None
+
+    perf.scenario("task_toggle")
+    for _ in range(rounds):
+        boxes = [c for c in at.checkbox]
+        if not boxes:
+            break
+        at = boxes[0].set_value(not boxes[0].value).run()
+        assert not at.exception, at.exception[0] if at.exception else None
+
+    perf.scenario("chat_send")
+    for i in range(rounds):
+        if not at.chat_input:
+            break
+        t = time.perf_counter()
+        at = at.chat_input[0].set_value(f"bench message {i}").run()
+        SEND_LATENCY.append((time.perf_counter() - t) * 1000)
+        assert not at.exception, at.exception[0] if at.exception else None
+
+    print()
+    print(perf.report("PER-PHASE RENDER COST"))
+    if SEND_LATENCY:
+        print()
+        print(f"CHAT SEND -> visible: avg {statistics.mean(SEND_LATENCY):6.0f} ms  "
+              f"{[f'{x:.0f}' for x in SEND_LATENCY]}")
+
+
+SEND_LATENCY = []
+
+
 if __name__ == "__main__":
     unseed()
     pid = seed()
     try:
         bench(pid)
         bench_realistic(pid)
+        bench_render_phases(pid)
     finally:
         unseed()

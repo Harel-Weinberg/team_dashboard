@@ -195,7 +195,10 @@ def require_login() -> bool:
 
 def logout() -> None:
     for key in list(st.session_state.keys()):
-        if key in ("user", "role", "view", "task_done_override", "_pending_writes") or str(
+        if key in (
+            "user", "role", "view", "task_done_override", "task_urgent_override",
+            "_pending_writes", "pending_msgs",
+        ) or str(
             key
         ).startswith("optimistic_"):
             st.session_state.pop(key, None)
