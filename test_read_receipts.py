@@ -270,6 +270,43 @@ def test_home_screen_activity_summary(pid):
     print("PASS: home screen shows the project activity summary line")
 
 
+def test_home_fragment_updates_live_without_navigation(pid):
+    """The home screen used to refresh unread badges / the activity line /
+    the urgent widget / the ping only on a full navigation-triggered rerun.
+    It's now wrapped in @st.fragment(run_every=HOME_POLL), so the browser's
+    own poll timer reruns just this fragment every couple of seconds.
+    Standing in for that here: rerun the SAME AppTest session without
+    touching session_state["view"] at all, and confirm a change made in
+    between shows up — no navigation, and no new polling loop was added to
+    produce it."""
+    import ui_components as ui
+
+    real_html = ui.components.html
+    calls = []
+    ui.components.html = lambda *a, **k: calls.append(a) or None
+    try:
+        at = login(new_app(), TEMP_ADMIN, TEMP_ADMIN_PW)
+        at.session_state["view"] = None
+        at = at.run()
+        assert not at.exception, f"Home screen crashed: {at.exception[0]}"
+
+        db.add_chat_message(pid, "arrived while on the home screen", OTHER_USER)
+        db.get_chat_unread_counts.clear()
+
+        at = at.run()  # stands in for the fragment's own run_every rerun
+        assert not at.exception, f"Home screen re-render crashed: {at.exception[0]}"
+        activity = [
+            m.value for m in at.markdown if '<div class="project-activity-line"' in (m.value or "")
+        ]
+        assert any("הודעות חדשות" in a for a in activity), (
+            f"Expected the new unread message to show up with no navigation, got: {activity}"
+        )
+        assert len(calls) >= 1, "expected the ping to fire on the same rerun that surfaces the new unread count"
+        print("PASS: home screen picks up a new unread message and pings on its own, without navigating away")
+    finally:
+        ui.components.html = real_html
+
+
 def test_task_list_header_row_aligns_with_cards(pid):
     """6 header columns must match _render_task's 6 columns exactly."""
     import ui_components as ui
@@ -296,6 +333,7 @@ if __name__ == "__main__":
         test_debounce_does_not_rewrite_on_every_tick(pid)
         test_ping_fires_only_on_a_genuine_increase()
         test_home_screen_activity_summary(pid)
+        test_home_fragment_updates_live_without_navigation(pid)
         test_task_list_header_row_aligns_with_cards(pid)
         print("\nALL READ-RECEIPT TESTS PASSED")
     finally:

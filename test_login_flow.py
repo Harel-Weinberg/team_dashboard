@@ -15,6 +15,32 @@ Covers:
 """
 
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1 import element_tree as _element_tree
+
+# Streamlit 1.58.0 AppTest bug: ElementTree.get_widget_states() walks the
+# PREVIOUS run's tree to seed the next run's widget values. If any
+# st.fragment renders on the run immediately after the login form's widgets
+# vanish (the form is only shown while logged out), the fragment's internal
+# bookkeeping leaves a node whose session_state entry was never populated,
+# and the plain KeyError lookup inside Widget.value crashes every following
+# .run() call. Reproduced with a script containing nothing but a login form
+# and one bare fragment — unrelated to this app's own code. Once main.py's
+# home screen became a fragment (for live badge/ping updates without
+# navigating), every test that does login() -> set a view -> run() hit this.
+# Treating an unresolvable widget as "no state" is exactly what a genuinely
+# fresh widget would report anyway, so this only affects orphaned nodes from
+# a discarded subtree, not any widget actually present in the current run.
+_orig_get_widget_state = _element_tree.get_widget_state
+
+
+def _get_widget_state_tolerating_orphans(node):
+    try:
+        return _orig_get_widget_state(node)
+    except KeyError:
+        return None
+
+
+_element_tree.get_widget_state = _get_widget_state_tolerating_orphans
 
 TEMP_ADMIN = "temp_test_admin_delete_me"
 TEMP_ADMIN_PW = "tmp-admin-pass-123"

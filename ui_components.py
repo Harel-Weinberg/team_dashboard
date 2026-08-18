@@ -1186,9 +1186,32 @@ def render_adhoc_board(title: str, subtitle: str, task_type: str):
     render_task_board(project_id=None, task_type=task_type)
 
 
-@perf.track("welcome")
+HOME_POLL = "2s"
+
+
 def render_welcome():
-    """Personalized greeting + floating project bubbles (main screen)."""
+    """Public entry point; the body runs inside a fragment.
+
+    Unlike the project dashboard, the home screen has no widget whose state
+    would be disrupted by a periodic rerun, so wrapping it costs nothing and
+    buys the same thing the chat/task-board polls already buy elsewhere:
+    unread badges, the activity line and the urgent widget update on their
+    own — including firing the ping sound — without the user navigating away
+    and back. The underlying queries are @st.cache_data with a 30s TTL, so a
+    2s poll only actually hits the database on a genuine cache invalidation,
+    not on every tick.
+    """
+    _home_fragment()
+
+
+@st.fragment(run_every=HOME_POLL)
+@perf.track("welcome")
+def _home_fragment():
+    # A fragment-scoped rerun never re-enters main(), so drain here too (see
+    # _task_board_fragment for why: without this, a background write's
+    # queued invalidation would never get applied and every poll tick would
+    # dutifully re-read the same stale cached bundle).
+    db.drain_deferred_invalidations()
     user = st.session_state["user"]
 
     st.markdown(
