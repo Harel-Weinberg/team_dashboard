@@ -57,6 +57,25 @@ CREATE TABLE IF NOT EXISTS project_chat (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- --------------------------------------------------------------------------
+-- Forward-compatibility columns for the planned kanban board (additive only —
+-- is_done remains the source of truth; no code reads these yet).
+-- --------------------------------------------------------------------------
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status TEXT;
+UPDATE tasks SET status = CASE WHEN is_done THEN 'done' ELSE 'todo' END
+ WHERE status IS NULL;
+ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'todo';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date DATE;
+
+-- --------------------------------------------------------------------------
+-- Indexes
+-- --------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_chat_project_time
+    ON project_chat (project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
+CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
+
 -- Default admin seeding (dummy passwords 'harel2026' / 'yitzhak2026') is done
 -- automatically by the app's init_db() when the users table is empty.
 -- Change these passwords from the User Management page after first login.

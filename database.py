@@ -159,6 +159,31 @@ ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_created_by_fkey;
 ALTER TABLE projects ADD CONSTRAINT projects_created_by_fkey
     FOREIGN KEY (created_by) REFERENCES users(username)
     ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- Forward-compatibility for the planned kanban board. Purely additive: is_done
+-- stays the source of truth and nothing reads these columns yet — they exist so
+-- adding the board later is a code change, not a second database migration.
+--
+-- The column is added WITHOUT a default so pre-existing rows land as NULL and
+-- the backfill below can target them precisely. Re-running this on every boot
+-- must never clobber a real status, so the backfill is guarded on IS NULL; the
+-- default is attached afterwards, for rows inserted from here on.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status TEXT;
+UPDATE tasks SET status = CASE WHEN is_done THEN 'done' ELSE 'todo' END
+ WHERE status IS NULL;
+ALTER TABLE tasks ALTER COLUMN status SET DEFAULT 'todo';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date DATE;
+"""
+
+
+# Indexes matching the access patterns in this module. Negligible at today's row
+# counts; they exist so the query plans stay flat as the tables grow.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_chat_project_time
+    ON project_chat (project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_project  ON tasks (project_id);
+CREATE INDEX IF NOT EXISTS idx_task_assignee ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_comment_task  ON task_comments (task_id);
 """
 
 # Every column that stores a username as identity-tagging metadata. Renaming a
@@ -189,6 +214,7 @@ def init_db() -> bool:
     with get_cursor() as cur:
         cur.execute(_SCHEMA)
         cur.execute(_MIGRATIONS)
+        cur.execute(_INDEXES)
         cur.execute("SELECT COUNT(*) AS n FROM users")
         if cur.fetchone()["n"] == 0:
             for username, password in _DEFAULT_ADMINS.items():

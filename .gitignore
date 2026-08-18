@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Local data backups (test-data purge, etc.)
+_backup/
