@@ -553,8 +553,9 @@ def _task_board_fragment(project_id: int | None, task_type: str):
 # Module C — Project chat (live + optimistic send)
 # ---------------------------------------------------------------------------
 
-# Must stay LONGER than database.CHAT_TTL, or the poll only re-serves cache.
-CHAT_POLL = "3s"
+# Must stay LONGER than database.CHAT_TTL / WATERMARK_TTL, or the poll only
+# re-serves cache.
+CHAT_POLL = "500ms"
 
 
 def _pending_chat(project_id: int) -> list[dict]:
@@ -594,6 +595,23 @@ def _on_chat_viewed(project_id: int, messages: list[dict]) -> None:
     when the project actually had unread messages — never on every poll tick.
     Deliberately a no-op until then.
     """
+
+
+def _watermarked_messages(project_id: int) -> list[dict]:
+    """Full message list, refetched only when the chat's watermark has moved.
+
+    get_chat_watermark() is a tiny index-only MAX(created_at) probe; get_chat()
+    is a real SELECT * ... LIMIT. Paying for the cheap one on every 500ms tick
+    and the expensive one only when something in this project's chat actually
+    changed is what keeps 500ms polling affordable per connected user.
+    """
+    seen = st.session_state.setdefault("chat_watermark_seen", {})
+    cached = st.session_state.setdefault("chat_last_messages", {})
+    watermark = db.get_chat_watermark(project_id)
+    if project_id not in cached or seen.get(project_id) != watermark:
+        cached[project_id] = db.get_chat(project_id)
+        seen[project_id] = watermark
+    return cached[project_id]
 
 
 def _promote_confirmed(pending: list[dict]) -> bool:
@@ -640,9 +658,12 @@ def _chat_fragment(project_id: int):
     # "confirmed but still a local echo" frame.
     if _promote_confirmed(pending):
         db.get_chat.clear()
+        db.get_chat_watermark.clear()
+        st.session_state.get("chat_watermark_seen", {}).pop(project_id, None)
+        st.session_state.get("chat_last_messages", {}).pop(project_id, None)
         _rerun_scoped()
 
-    messages = db.get_chat(project_id)
+    messages = _watermarked_messages(project_id)
 
     # Reconcile: drop any echo whose id has come back from the server. This
     # only prevents duplicate rendering — it never drives opacity/failed state

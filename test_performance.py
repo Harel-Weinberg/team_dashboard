@@ -139,6 +139,49 @@ def test_prefetch_is_nonblocking(pid):
     print(f"PASS: home-screen prefetch is fire-and-forget ({elapsed:.0f} ms to enqueue)")
 
 
+def test_chat_watermark_shortcircuits_full_fetch(pid):
+    """The full get_chat() query must only run again once the watermark moves.
+
+    ui_components._watermarked_messages() is what the 500ms chat fragment
+    calls every tick; this proves an idle chat costs repeated cheap MAX()
+    probes but NOT repeated full SELECT * fetches, and that a real new
+    message is still detected on the very next tick.
+    """
+    import streamlit as st
+    import ui_components as ui
+
+    for key in ("chat_watermark_seen", "chat_last_messages"):
+        st.session_state.pop(key, None)
+    db.get_chat.clear()
+    db.get_chat_watermark.clear()
+
+    real_get_chat = db.get_chat
+    calls = []
+
+    def counting_get_chat(project_id, limit=db.CHAT_PAGE):
+        calls.append(project_id)
+        return real_get_chat(project_id, limit)
+
+    counting_get_chat.clear = real_get_chat.clear  # add_chat_message calls get_chat.clear()
+    db.get_chat = counting_get_chat
+    try:
+        ui._watermarked_messages(pid)
+        ui._watermarked_messages(pid)  # nothing changed since the first call
+        assert len(calls) == 1, f"expected 1 full fetch across 2 unchanged ticks, got {len(calls)}"
+
+        db.add_chat_message(pid, "watermark probe", TEMP_ADMIN)
+        third = ui._watermarked_messages(pid)
+        assert len(calls) == 2, "a real new message must trigger exactly one more full fetch"
+        assert any(m["message"] == "watermark probe" for m in third), "new message not returned"
+    finally:
+        db.get_chat = real_get_chat
+        db.get_chat.clear()
+        db.get_chat_watermark.clear()
+        for key in ("chat_watermark_seen", "chat_last_messages"):
+            st.session_state.pop(key, None)
+    print("PASS: watermark short-circuits redundant full fetches, still detects real changes")
+
+
 if __name__ == "__main__":
     pid, task = _seed()
     try:
@@ -147,6 +190,7 @@ if __name__ == "__main__":
         test_writes_never_serve_stale_data(pid, task)
         test_board_dispatch()
         test_prefetch_is_nonblocking(pid)
+        test_chat_watermark_shortcircuits_full_fetch(pid)
     finally:
         _cleanup()
     print("\nALL PERFORMANCE TESTS PASSED")

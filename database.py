@@ -34,9 +34,12 @@ from psycopg2.extras import RealDictCursor
 # clears everything — the TTL only caps how old a TEAMMATE's change can look.
 VOLATILE_TTL = 30   # seconds — specs, tasks, comments
 STABLE_TTL = 120    # seconds — project & user lists
-# Chat is polled by a 3s fragment. Its TTL must be SHORTER than that poll
-# interval, or the poller just re-serves cache and the "live" chat isn't live.
-CHAT_TTL = 2        # seconds — project chat only
+# Chat is polled by a 500ms fragment. Both TTLs below must stay SHORTER than
+# that poll interval, or the poller just re-serves cache and the "live" chat
+# isn't live. WATERMARK_TTL doubles as the ceiling on how many full message
+# fetches a single poll cadence can force — see get_chat_watermark().
+CHAT_TTL = 0.25         # seconds — full message list
+WATERMARK_TTL = 0.25    # seconds — max(created_at) probe
 
 # ---------------------------------------------------------------------------
 # Connection handling
@@ -756,6 +759,29 @@ def add_comment(task_id: int, content: str, user: str) -> None:
 CHAT_PAGE = 200
 
 
+@st.cache_data(ttl=WATERMARK_TTL, show_spinner=False)
+@perf.track("db:chat_watermark")
+def get_chat_watermark(project_id: int) -> datetime | None:
+    """The newest created_at for a project's chat — index-only via idx_chat_project_time.
+
+    Cheap enough to call on every poll tick. The chat fragment calls this
+    FIRST and only reaches for the full get_chat() below when the value has
+    moved since the last tick, so an idle chat costs one tiny MAX() probe per
+    poll instead of a full row fetch.
+
+    st.cache_data is a per-process resource cache, not per-session: N
+    sessions polling the SAME project share one cached value, so the real
+    query rate against Supabase is bounded by 1/WATERMARK_TTL per actively-
+    viewed project, not by the number of connected users.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT max(created_at) AS latest FROM project_chat WHERE project_id = %s",
+            (project_id,),
+        )
+        return cur.fetchone()["latest"]
+
+
 @st.cache_data(ttl=CHAT_TTL, show_spinner=False)
 @perf.track("db:chat_query")
 def get_chat(project_id: int, limit: int = CHAT_PAGE) -> list[dict]:
@@ -799,6 +825,7 @@ def _refresh_chat_after_write() -> None:
     """
     if not on_worker_thread():
         get_chat.clear()
+        get_chat_watermark.clear()
 
 
 # ---------------------------------------------------------------------------
