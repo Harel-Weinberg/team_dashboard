@@ -108,6 +108,59 @@ def test_idempotent_retry(pid):
     print("PASS: retrying a send with the same client_msg_id is a no-op")
 
 
+def test_task_board_poll_needs_its_own_drain(pid):
+    """Reproduces, then confirms the fix for, the "stuck at מסתנכרן" report.
+
+    set_task_done runs on a worker thread and clears the task caches through
+    db._invalidate(), which — per the E6 rule that workers must not call
+    st.cache_data.clear() themselves — only QUEUES the clear. Nothing applies
+    it until something calls drain_deferred_invalidations(). A polling
+    fragment that reruns on schedule but never drains would therefore poll a
+    permanently stale cache forever: this is the actual root cause the user
+    hit, not "a background thread doesn't trigger a rerun" as originally
+    diagnosed. _task_board_fragment now drains at its own top (ui_components.
+    py) precisely so its 1s poll can see a write that landed since the last
+    tick. This test proves both halves: the staleness exists before a drain,
+    and one drain call is enough to clear it — independent of AppTest, which
+    cannot simulate a fragment-only rerun (it always re-executes the full
+    script, so it could not have caught this).
+    """
+    db.clear_task_caches()
+    task_id = None
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO tasks (project_id, task_type, title, created_by) "
+            "VALUES (%s, 'project', 'drain probe', %s) RETURNING id",
+            (pid, TEMP_ADMIN),
+        )
+        task_id = cur.fetchone()["id"]
+    db.clear_task_caches()
+    before = next(t for t in db.get_tasks(project_id=pid) if t["id"] == task_id)
+    assert before["is_done"] is False
+
+    future = optimistic.submit_write(
+        "task-done", db.set_task_done, task_id, True, TEMP_ADMIN
+    )
+    exc = future.exception(timeout=30)
+    assert exc is None, f"background write raised: {exc!r}"
+
+    # The write landed in Postgres, but its cache clear is still queued.
+    stale = next(t for t in db.get_tasks(project_id=pid) if t["id"] == task_id)
+    assert stale["is_done"] is False, (
+        "expected a stale read before drain — if this fails, either the "
+        "deferred-invalidation queue changed, or the cache TTL expired "
+        "naturally and this test is no longer isolating what it claims to"
+    )
+    print("PASS: reproduced the bug — a worker's write is invisible before drain")
+
+    drained = db.drain_deferred_invalidations()
+    assert drained > 0, "expected the queued task-cache clear to be drained"
+    fresh = next(t for t in db.get_tasks(project_id=pid) if t["id"] == task_id)
+    assert fresh["is_done"] is True, "drain did not surface the worker's write"
+    print("PASS: draining once (as _task_board_fragment now does every poll "
+          "tick) makes the write visible with no further user interaction")
+
+
 if __name__ == "__main__":
     install_spies()
     pid = None
@@ -118,6 +171,7 @@ if __name__ == "__main__":
         test_no_streamlit_calls_from_workers()
         test_invalidations_were_deferred(pid)
         test_idempotent_retry(pid)
+        test_task_board_poll_needs_its_own_drain(pid)
         print("\nALL THREAD-DISCIPLINE TESTS PASSED")
     finally:
         teardown(pid)

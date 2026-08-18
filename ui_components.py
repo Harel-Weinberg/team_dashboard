@@ -467,19 +467,44 @@ def _render_pending_task(echo: dict):
         st.caption("מסתנכרן עם מסד הנתונים…")
 
 
+# Reconciliation (surviving_echoes / _effective_done / _effective_urgent
+# below) only re-evaluates when this fragment executes. Without a poll, a
+# background write that resolves while the user isn't clicking anything else
+# in this board would sit at "מסתנכרן…" until some unrelated interaction
+# happened to rerun it. The check itself is nearly free when nothing is
+# pending — get_tasks()/get_comments_map() are cache hits for 30s
+# (VOLATILE_TTL) at a time, so most of these ticks touch no database at all.
+TASK_BOARD_POLL = "1s"
+
+
 def render_task_board(project_id: int | None = None, task_type: str = "project"):
     """Public entry point; the body runs inside a fragment.
 
     A checkbox, an urgency toggle or an add-task submit therefore re-renders
     only this board — not the sidebar, the header, the theme injection and the
-    other two tabs.
+    other two tabs. The poll keeps that isolation: it reruns this fragment
+    only (never scope="app"), so an in-flight write resolving on its own
+    still can't force a full-page rerender.
     """
     _task_board_fragment(project_id, task_type)
 
 
-@st.fragment
+@st.fragment(run_every=TASK_BOARD_POLL)
 @perf.track("tasks")
 def _task_board_fragment(project_id: int | None, task_type: str):
+    # A fragment-scoped rerun never re-enters main(), so drain here too:
+    #
+    # add_task/set_task_done/set_task_urgent/add_comment run on a background
+    # worker thread. Per the E6 thread-discipline rule, a worker can't call
+    # st.cache_data.clear() itself — db._invalidate() queues the clear instead
+    # and only main() used to drain it. Without this line, the poll below
+    # would dutifully rerun every second and read the SAME stale cached
+    # bundle each time (until VOLATILE_TTL expired on its own), because the
+    # write that made it stale never got applied. That combination — queued
+    # invalidation, no drain point reachable from a fragment-only rerun — was
+    # the actual bug: the fix isn't "make a background write trigger a
+    # rerun", it's "make sure a rerun (however it happens) can see the write".
+    db.drain_deferred_invalidations()
     user = st.session_state["user"]
     # A fragment-scoped rerun never re-enters main(), so drain the toast queue
     # here as well — otherwise a completion/urgency toast would not appear
