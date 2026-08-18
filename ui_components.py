@@ -20,6 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.errors import StreamlitAPIException
 
 import auth
@@ -396,6 +397,56 @@ def _unread_badge_html(count: int) -> str:
     if count <= 0:
         return ""
     return f'<span class="unread-badge">🔵 {count}</span>'
+
+
+# A short sine-wave "ping" synthesized with the Web Audio API rather than an
+# embedded audio file — no binary asset to ship, and the envelope (linear
+# ramp up/down instead of a hard on/off) avoids the audible click a raw
+# on/off gain change would produce.
+_PING_JS = """
+<script>
+(function() {
+    try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.16, ctx.currentTime + 0.02);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.22);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.25);
+    } catch (e) {
+        // Web Audio unavailable, or the browser's autoplay policy is
+        // blocking sound before any user gesture on the page — fail
+        // silently rather than surface a JS error in a hidden iframe.
+    }
+})();
+</script>
+"""
+
+
+def _play_ping_if_increased(session_key: str, current_count: int) -> None:
+    """Play a short ping the instant `current_count` rises above what this
+    session last saw for `session_key` — purely a comparison against
+    st.session_state, run inside whatever render already happened to fire
+    (a full rerun on navigation, or an existing fragment's own poll tick).
+    No timer, interval or new st.fragment is created for this: it rides
+    whichever refresh cycle was already going to run for other reasons.
+
+    Silent on the very first observation of a key: a pre-existing unread
+    backlog seen at login is not a "new" arrival, and silent on any
+    decrease (that's a read, not a message arriving).
+    """
+    baseline = st.session_state.setdefault("unread_ping_baseline", {})
+    previous = baseline.get(session_key)
+    baseline[session_key] = current_count
+    if previous is not None and current_count > previous:
+        components.html(_PING_JS, height=0)
 
 
 def _mark_scope_viewed(scope_type: str, scope_id: int, items: list[dict]) -> None:
@@ -1035,6 +1086,13 @@ def _chat_fragment(project_id: int):
                         _dispatch_chat_write(project_id, entry)
                         _rerun_scoped()
 
+    # Computed BEFORE _on_chat_viewed marks this batch read, so the ping
+    # sees the genuinely-unread count for this tick, not the just-cleared
+    # one — same query the tab-label badge uses, riding this fragment's
+    # own existing 500ms poll rather than a timer of its own.
+    _play_ping_if_increased(
+        f"chat_tab_{project_id}", db.get_chat_unread_counts(user).get(project_id, 0)
+    )
     _on_chat_viewed(project_id, messages)
 
     if prompt := st.chat_input("כתבו הודעה לצוות...", key=f"chat_input_{project_id}"):
@@ -1084,6 +1142,7 @@ def render_project_dashboard(project: dict):
     # tab selection back to `default`.
     user = st.session_state["user"]
     chat_unread = db.get_chat_unread_counts(user).get(project["id"], 0)
+    _play_ping_if_increased(f"chat_tab_{project['id']}", chat_unread)
     chat_label = "💬 תקשורת צוות"
     if chat_unread > 0:
         chat_label += f" **🔵 {chat_unread}**"
@@ -1155,6 +1214,7 @@ def render_welcome():
     # query per project per bubble.
     chat_unread = db.get_chat_unread_counts(user)
     open_counts = db.get_open_task_counts()
+    _play_ping_if_increased("home_total_chat_unread", sum(chat_unread.values()))
 
     def _activity_line(project_id: int) -> str:
         unread = chat_unread.get(project_id, 0)

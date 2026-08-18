@@ -170,6 +170,45 @@ def test_task_comment_badge_appears_and_clears(pid, task):
     print("PASS: task comments badge clears after the task board has been viewed")
 
 
+def test_ping_fires_only_on_a_genuine_increase():
+    """The notification ping: event-driven off a plain session_state
+    comparison, not a timer — verified here by calling the comparison
+    helper directly with a sequence of counts and spying on
+    st.components.v1.html (the actual sound trigger)."""
+    import ui_components as ui
+
+    real_html = ui.components.html
+    calls = []
+    ui.components.html = lambda *a, **k: calls.append(a) or None
+    try:
+        import streamlit as st
+
+        st.session_state.clear()
+        key = "test_ping_scope"
+
+        ui._play_ping_if_increased(key, 3)
+        assert len(calls) == 0, "first observation of a key must stay silent (backlog, not new)"
+        print("PASS: no ping on the first-ever observation of a scope")
+
+        ui._play_ping_if_increased(key, 3)
+        assert len(calls) == 0, "an unchanged count must not ping"
+        print("PASS: no ping when the count is unchanged")
+
+        ui._play_ping_if_increased(key, 1)
+        assert len(calls) == 0, "a decrease (a read happening) must not ping"
+        print("PASS: no ping on a decrease")
+
+        ui._play_ping_if_increased(key, 4)
+        assert len(calls) == 1, f"a genuine increase must ping exactly once, got {len(calls)}"
+        print("PASS: exactly one ping on a genuine increase")
+
+        ui._play_ping_if_increased(key, 4)
+        assert len(calls) == 1, "the same count again must not re-ping"
+        print("PASS: no repeat ping while the count stays at the new level")
+    finally:
+        ui.components.html = real_html
+
+
 def test_debounce_does_not_rewrite_on_every_tick(pid):
     """The core "no infinite loop of writes" requirement: viewing the SAME
     unchanged messages repeatedly must dispatch mark_scope_read exactly once,
@@ -255,6 +294,7 @@ if __name__ == "__main__":
         test_chat_tab_badge_appears_and_clears(pid)
         test_task_comment_badge_appears_and_clears(pid, task)
         test_debounce_does_not_rewrite_on_every_tick(pid)
+        test_ping_fires_only_on_a_genuine_increase()
         test_home_screen_activity_summary(pid)
         test_task_list_header_row_aligns_with_cards(pid)
         print("\nALL READ-RECEIPT TESTS PASSED")
