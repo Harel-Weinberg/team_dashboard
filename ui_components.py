@@ -596,23 +596,59 @@ def _on_chat_viewed(project_id: int, messages: list[dict]) -> None:
     """
 
 
+def _promote_confirmed(pending: list[dict]) -> bool:
+    """Mark entries whose background write has resolved successfully.
+
+    A resolved, exception-free Future already proves the row is committed —
+    the unique index on client_msg_id makes the insert idempotent, so there is
+    nothing left to verify by waiting for the row to come back from a read.
+    Visual state is driven from here, NOT from whether the id has appeared in
+    a fresh db.get_chat() read (that check only ever removes duplicates once
+    the server row is loaded — see the "landed" filter below).
+
+    Returns True the first time any entry gets promoted this run, so the
+    caller can force an immediate, uncached refetch instead of waiting for
+    CHAT_TTL or the next poll tick.
+    """
+    newly_confirmed = False
+    for entry in pending:
+        future = entry.get("future")
+        if future is None or not future.done() or future.exception() is not None:
+            continue
+        if not entry.get("confirmed"):
+            entry["confirmed"] = True
+            newly_confirmed = True
+    return newly_confirmed
+
+
 @st.fragment(run_every=CHAT_POLL)
 @perf.track("chat")
 def _chat_fragment(project_id: int):
     """The whole chat panel, isolated from the rest of the page.
 
-    Being a fragment is what makes polling affordable: every 3s this re-runs
-    on its own, so a teammate's message appears without a click and without
-    re-rendering the sidebar, the header or the other two tabs.
+    Being a fragment is what makes polling affordable: every poll tick this
+    re-runs on its own, so a teammate's message appears without a click and
+    without re-rendering the sidebar, the header or the other two tabs.
     """
     user = st.session_state["user"]
+    pending = _pending_chat(project_id)
+
+    # A send that just succeeded jumps straight to full opacity instead of
+    # waiting out CHAT_TTL / the next poll tick: force one uncached refetch
+    # right now, before rendering, so this same tick already shows the real
+    # row (dropped from `pending` below) instead of a transient
+    # "confirmed but still a local echo" frame.
+    if _promote_confirmed(pending):
+        db.get_chat.clear()
+        _rerun_scoped()
+
     messages = db.get_chat(project_id)
 
-    # Reconcile: drop any echo whose id has come back from the server. Matching
-    # on the client id is exact — the old sender+body comparison would collapse
-    # two identical messages into one.
+    # Reconcile: drop any echo whose id has come back from the server. This
+    # only prevents duplicate rendering — it never drives opacity/failed state
+    # (that comes from the Future itself, in _promote_confirmed above).
     landed = {m["client_msg_id"] for m in messages if m.get("client_msg_id")}
-    pending = [e for e in _pending_chat(project_id) if e["client_msg_id"] not in landed]
+    pending = [e for e in pending if e["client_msg_id"] not in landed]
     st.session_state["pending_msgs"][project_id] = pending
 
     for msg in messages:
@@ -625,10 +661,17 @@ def _chat_fragment(project_id: int):
     for entry in pending:
         future = entry.get("future")
         failed = future is not None and future.done() and future.exception() is not None
-        # Keyed containers get an st-key-* class in the DOM; theme.py mutes the
-        # in-flight ones. Failed messages are NOT muted — they need attention.
-        key = f"{'chatfail' if failed else 'chatpend'}_{entry['client_msg_id']}"
-        with st.container(key=key):
+        # Keyed containers get an st-key-* class in the DOM; theme.py mutes
+        # only the still-in-flight ones. Confirmed and failed entries render
+        # at full opacity — a failure needs attention, and a confirmed send
+        # is (transiently) as good as landed.
+        if failed:
+            key_prefix = "chatfail"
+        elif entry.get("confirmed"):
+            key_prefix = "chatconfirmed"
+        else:
+            key_prefix = "chatpend"
+        with st.container(key=f"{key_prefix}_{entry['client_msg_id']}"):
             with st.chat_message(entry["sender"],
                                  avatar=AVATARS.get(entry["sender"], DEFAULT_AVATAR)):
                 st.markdown(_chat_meta_html(entry["sender"], fmt_ts(entry["created_at"])),
@@ -638,6 +681,7 @@ def _chat_fragment(project_id: int):
                     # Never silently drop a message the user watched appear.
                     st.caption(f"⚠️ ההודעה לא נשלחה — {future.exception()}")
                     if st.button("↻ שליחה חוזרת", key=f"retry_{entry['client_msg_id']}"):
+                        entry["confirmed"] = False
                         _dispatch_chat_write(project_id, entry)
                         _rerun_scoped()
 
@@ -651,6 +695,7 @@ def _chat_fragment(project_id: int):
                 "sender": user,
                 "body": text,
                 "created_at": datetime.now(LOCAL_TZ),
+                "confirmed": False,
             }
             _dispatch_chat_write(project_id, entry)
             _pending_chat(project_id).append(entry)

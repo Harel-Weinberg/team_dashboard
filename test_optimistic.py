@@ -76,7 +76,8 @@ def test_optimistic_chat(at, project_id):
 
     at = _wait_for_sync(at)
     assert _visible(at, text), "Message must persist after sync"
-    assert not _ss(at, f"optimistic_chat_{project_id}"), "Chat echo not pruned"
+    pending = _ss(at, "pending_msgs", {}).get(project_id, [])
+    assert not any(e["body"] == text for e in pending), "Chat echo not pruned"
     import database as db
 
     assert any(m["message"] == text for m in db.get_chat(project_id)), "Message missing from DB"
@@ -151,6 +152,75 @@ def test_sync_failure_is_surfaced():
     print("PASS: failed background sync surfaces a visible warning")
 
 
+def test_chat_confirms_without_waiting_for_db_echo():
+    """A resolved, exception-free Future promotes an entry on its own.
+
+    White-box on purpose: the point of this check is that _promote_confirmed
+    does NOT consult db.get_chat() at all, so it cannot be waiting on the poll
+    interval or the cache TTL to know a send landed.
+    """
+    from concurrent.futures import Future
+
+    import ui_components as ui
+
+    not_done = Future()
+    entry_pending = {"client_msg_id": "a", "future": not_done, "confirmed": False}
+    assert ui._promote_confirmed([entry_pending]) is False
+    assert entry_pending["confirmed"] is False
+
+    ok = Future()
+    ok.set_result(None)
+    entry_ok = {"client_msg_id": "b", "future": ok, "confirmed": False}
+    assert ui._promote_confirmed([entry_ok]) is True, "should report a fresh promotion"
+    assert entry_ok["confirmed"] is True
+    assert ui._promote_confirmed([entry_ok]) is False, "must not re-trigger once confirmed"
+
+    failed = Future()
+    failed.set_exception(RuntimeError("boom"))
+    entry_failed = {"client_msg_id": "c", "future": failed, "confirmed": False}
+    assert ui._promote_confirmed([entry_failed]) is False, "a failure is not a confirmation"
+    assert entry_failed["confirmed"] is False
+    print("PASS: confirmation comes from the Future alone, not from a DB re-read")
+
+
+def test_chat_send_failure_shows_retry_at_full_opacity(at, project_id):
+    """A failed chat send must stay visible with a retry control, not vanish."""
+    import ui_components as ui
+
+    text = f"will fail {int(time.time())}"
+
+    real_dispatch = ui._dispatch_chat_write
+
+    def failing_dispatch(pid, entry):
+        future = ui.optimistic._executor().submit(
+            lambda: (_ for _ in ()).throw(RuntimeError("simulated send failure"))
+        )
+        entry["future"] = future
+
+    ui._dispatch_chat_write = failing_dispatch
+    try:
+        at.chat_input(key=f"chat_input_{project_id}").set_value(text)
+        at = at.run()
+        # Give the doomed future a moment to actually resolve as failed.
+        deadline = time.time() + 5
+        pending = _ss(at, "pending_msgs", {}).get(project_id, [])
+        entry = next((e for e in pending if e["body"] == text), None)
+        assert entry is not None, "Send did not create a pending entry"
+        while time.time() < deadline and not entry["future"].done():
+            time.sleep(0.1)
+        at = at.run()
+    finally:
+        ui._dispatch_chat_write = real_dispatch
+
+    assert _visible(at, text), "Failed send must stay on screen, not disappear"
+    assert any("↻ שליחה חוזרת" in (b.label or "") for b in at.button), "Retry control missing"
+    assert any("simulated send failure" in (c.value or "") for c in at.caption), (
+        "Failure must be surfaced, not silent"
+    )
+    print("PASS: failed chat send stays visible with an explicit retry control")
+    return at
+
+
 if __name__ == "__main__":
     create_temp_admin()
     _delete_temp_project()
@@ -159,6 +229,8 @@ if __name__ == "__main__":
         assert at.session_state["user"] == TEMP_ADMIN, "Login failed"
         at, project_id = test_optimistic_project_creation(at)
         at = test_optimistic_chat(at, project_id)
+        test_chat_confirms_without_waiting_for_db_echo()
+        at = test_chat_send_failure_shows_retry_at_full_opacity(at, project_id)
         at = test_optimistic_task_and_comment(at, project_id)
         test_sync_failure_is_surfaced()
     finally:
