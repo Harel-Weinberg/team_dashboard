@@ -766,8 +766,19 @@ def render_project_dashboard(project: dict):
     st.title(f"📂 {project['name']}")
     st.caption(f"נוצר על ידי {project['created_by']} · {fmt_ts(project['created_at'])}")
 
+    # Spec is the home tab for every project. Without a per-project key,
+    # st.tabs is one widget instance shared across every project dashboard
+    # (same call site, same labels) — the frontend keeps whichever tab index
+    # you last clicked, so opening a different project from the "Chat" tab of
+    # a previous one landed you straight back on "Chat". Keying by project id
+    # makes each project's tabs a distinct widget: switching projects mounts
+    # a fresh instance, which starts on `default` regardless of what was
+    # selected in the last one.
+    tab_labels = ["📋 אפיון המוצר", "✅ משימות פיתוח", "💬 תקשורת צוות"]
     spec_tab, tasks_tab, chat_tab = st.tabs(
-        ["📋 אפיון המוצר", "✅ משימות פיתוח", "💬 תקשורת צוות"]
+        tab_labels,
+        key=f"project_tabs_{project['id']}",
+        default=tab_labels[0],
     )
     with spec_tab:
         _render_spec(project["id"])
